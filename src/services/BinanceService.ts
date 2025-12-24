@@ -61,12 +61,17 @@ export class BinanceService {
   public async getCandles(
     symbol: string,
     interval: string = '5m',
-    limit: number = 200
+    limit: number = 1000,
+    startTime?: number,
+    endTime?: number
   ): Promise<Candle[]> {
     try {
-      const response = await this.client.get('/fapi/v1/klines', {
-        params: { symbol, interval, limit }
-      });
+      const params: any = { symbol, interval, limit };
+      
+      if (startTime) params.startTime = startTime;
+      if (endTime) params.endTime = endTime;
+
+      const response = await this.client.get('/fapi/v1/klines', { params });
 
       return response.data.map((kline: any[]) => ({
         timestamp: kline[0],
