@@ -62,6 +62,14 @@ import {
         leverage: riskParams.leverage
       };
     }
+
+    /**
+     * Get current risk configuration
+     * Добавляем недостающий метод
+     */
+    public getRiskConfig(): RiskParameters {
+        return config.getRiskConfig();
+    }
   
     /**
      * Calculate stop loss using ATR
