@@ -5,7 +5,7 @@
 
 import Database from 'better-sqlite3';
 import * as path from 'path';
-import { Position, TradeResult, BacktestResult } from '../types';
+import { Position, TradeResult, BacktestResult, PositionStatus } from '../types';
 import { logger } from './Logger';
 
 export class DatabaseManager {
@@ -300,7 +300,7 @@ export class DatabaseManager {
         closePrice: row.exit,
         pnl: row.pnl,
         pnlPercent: row.pnlPercent,
-        status: 'CLOSED',
+        status: PositionStatus.CLOSED,
         exitReason: row.exitReason,
         tags: JSON.parse(row.tags || '[]')
       },
