@@ -91,35 +91,53 @@ import {
      * Fetch historical data
      */
     private async fetchHistoricalData(
-      symbol: string,
-      startDate: Date,
-      endDate: Date
-    ): Promise<Candle[]> {
-      const allCandles: Candle[] = [];
-      let currentTime = startDate.getTime();
-      const endTime = endDate.getTime();
+        symbol: string,
+        startDate: Date,
+        endDate: Date
+      ): Promise<Candle[]> {
+        const allCandles: Candle[] = [];
+        let currentTime = startDate.getTime();
+        const endTime = endDate.getTime();
+    
+        // Добавим лог для отладки
+        logger.info('Backtest', `Fetching data for ${symbol} from ${startDate.toISOString()}...`);
   
-      while (currentTime < endTime) {
-        const candles = await this.binance.getCandles(symbol, '5m', 1000);
+        while (currentTime < endTime) {
+          // ИСПРАВЛЕНИЕ: Передаем currentTime как startTime
+          const candles = await this.binance.getCandles(symbol, '5m', 1000, currentTime);
+          
+          if (candles.length === 0) break;
+    
+          // Filter candles in time range
+          const filtered = candles.filter(c => 
+            c.timestamp >= startDate.getTime() && 
+            c.timestamp <= endDate.getTime()
+          );
+    
+          allCandles.push(...filtered);
+          
+          // Лог прогресса, чтобы видеть, что данные идут
+          if (allCandles.length % 5000 === 0) {
+              process.stdout.write('.');
+          }
+  
+          // Stop if we reached the end of available data (last candle is close to now)
+          const lastCandleTime = candles[candles.length - 1].timestamp;
+          if (lastCandleTime >= endTime || candles.length < 1000) {
+              break;
+          }
+    
+          // Move to next batch (last candle time + 5 mins)
+          currentTime = lastCandleTime + 300000; 
+    
+          // Avoid rate limits
+          await Helpers.sleep(200); 
+        }
         
-        if (candles.length === 0) break;
-  
-        // Filter candles in time range
-        const filtered = candles.filter(c => 
-          c.timestamp >= startDate.getTime() && 
-          c.timestamp <= endDate.getTime()
-        );
-  
-        allCandles.push(...filtered);
-  
-        // Move to next batch
-        currentTime = candles[candles.length - 1].timestamp + 300000; // 5 min
-  
-        // Avoid rate limits
-        await Helpers.sleep(500);
-      }
-  
-      return allCandles.sort((a, b) => a.timestamp - b.timestamp);
+        console.log(''); // New line after dots
+        logger.info('Backtest', `Loaded ${allCandles.length} candles for ${symbol}`);
+    
+        return allCandles.sort((a, b) => a.timestamp - b.timestamp);
     }
   
     /**
