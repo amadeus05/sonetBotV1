@@ -22,11 +22,13 @@ const MAX_TOTAL_MARGIN_COMMITMENT_RATIO = 0.5; // Максимум 50% от те
 
 export class RiskManager {
   private currentBalance: number;
+  private dailyStartBalance: number; // Баланс на начало дня для фиксации лимита потерь
   private dailyPnL: number = 0;
   private lastResetDate: string = '';
 
   constructor(initialBalance: number) {
     this.currentBalance = initialBalance;
+    this.dailyStartBalance = initialBalance; // Инициализируем стартовым балансом
     this.resetDailyPnL();
   }
 
@@ -151,7 +153,7 @@ export class RiskManager {
     if (this.hasExceededDailyLoss()) {
       logger.warn('RiskManager', 'Daily loss limit reached', { 
         dailyPnL: this.dailyPnL,
-        limit: riskParams.maxDailyLoss * this.currentBalance
+        limit: riskParams.maxDailyLoss * this.dailyStartBalance
       });
       return false;
     }
@@ -171,7 +173,9 @@ export class RiskManager {
   private hasExceededDailyLoss(): boolean {
     this.resetDailyPnL();
     const riskParams = config.getRiskConfig();
-    const maxDailyLoss = this.currentBalance * riskParams.maxDailyLoss;
+    
+    // ИСПРАВЛЕНИЕ: Считаем лимит от баланса на НАЧАЛО дня, а не от текущего
+    const maxDailyLoss = this.dailyStartBalance * riskParams.maxDailyLoss;
 
     return this.dailyPnL <= -maxDailyLoss;
   }
@@ -209,6 +213,8 @@ export class RiskManager {
     
     if (this.lastResetDate !== today) {
       this.dailyPnL = 0;
+      // Фиксируем баланс на начало нового дня
+      this.dailyStartBalance = this.currentBalance;
       this.lastResetDate = today;
     }
   }
@@ -342,7 +348,10 @@ export class RiskManager {
 
     // Stop if daily loss > 10%
     this.resetDailyPnL();
-    const dailyLossPercent = (this.dailyPnL / this.currentBalance) * 100;
+    
+    // ИСПРАВЛЕНИЕ: Используем dailyStartBalance для расчета процента дневных потерь
+    const dailyLossPercent = (this.dailyPnL / this.dailyStartBalance) * 100;
+    
     if (dailyLossPercent < -10) {
       logger.error('RiskManager', 'EMERGENCY STOP: Critical daily loss', { 
         dailyLoss: dailyLossPercent 
