@@ -204,9 +204,17 @@ export class RegimeDetector {
 
   /**
    * Get regime strength score (0-1)
+   * Updated: Now accepts optional cached ADX and Volatility to prevent recalculation.
    */
-  public getRegimeStrength(candles: Candle[], regime: MarketRegime): number {
-    const adx = this.calculateStandardADX(candles, ADX_PERIOD);
+  public getRegimeStrength(
+      candles: Candle[], 
+      regime: MarketRegime, 
+      cachedAdx?: number, 
+      cachedVolatility?: number
+    ): number {
+    
+    // Используем кешированное значение или считаем заново, если не передано
+    const adx = cachedAdx ?? this.calculateStandardADX(candles, ADX_PERIOD);
 
     switch (regime) {
       case MarketRegime.TRENDING:
@@ -219,7 +227,7 @@ export class RegimeDetector {
       
       case MarketRegime.VOLATILE:
         // Based on volatility
-        const volatility = this.calculateVolatility(candles, VOLATILITY_PERIOD);
+        const volatility = cachedVolatility ?? this.calculateVolatility(candles, VOLATILITY_PERIOD);
         return Math.min(volatility / 5, 1);
       
       default:
@@ -238,8 +246,11 @@ export class RegimeDetector {
       [MarketRegime.UNKNOWN]: '❓'
     };
 
-    const strength = this.getRegimeStrength(candles, regime);
+    // Calculate once
     const adx = this.calculateStandardADX(candles, ADX_PERIOD);
+    
+    // Pass calculated ADX to strength function
+    const strength = this.getRegimeStrength(candles, regime, adx);
 
     return `${regimeEmoji[regime]} ${regime} | ADX: ${adx.toFixed(1)} | Strength: ${(strength * 100).toFixed(0)}%`;
   }
