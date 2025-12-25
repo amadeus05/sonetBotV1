@@ -31,36 +31,37 @@ import {
      * Calculate position size based on risk parameters
      */
     public calculatePositionSize(
-      signal: TradingSignal,
-      candles: Candle[]
-    ): PositionSizeCalculation {
-      const riskParams = config.getRiskConfig();
-  
-      // Calculate stop loss distance
-      const slDistance = Math.abs(signal.entry - signal.stopLoss);
-      const slPercent = (slDistance / signal.entry) * 100;
-  
-      // Calculate risk amount in USD
-      const riskAmount = this.currentBalance * riskParams.riskPerTrade;
-  
-      // Calculate position size
-      // Size = (Risk Amount / SL %) * Leverage
-      const sizeUSD = (riskAmount / (slPercent / 100)) * riskParams.leverage;
-  
-      // Calculate quantity in base asset
-      const quantity = sizeUSD / signal.entry;
-  
-      // Apply confidence adjustment (lower confidence = smaller size)
-      const adjustedSize = sizeUSD * signal.confidence;
-      const adjustedQuantity = quantity * signal.confidence;
-  
-      return {
-        size: adjustedSize,
-        quantity: adjustedQuantity,
-        risk: riskAmount,
-        riskPercent: riskParams.riskPerTrade * 100,
-        leverage: riskParams.leverage
-      };
+        signal: TradingSignal,
+        candles: Candle[]
+      ): PositionSizeCalculation {
+        const riskParams = config.getRiskConfig();
+    
+        // Calculate stop loss distance
+        const slDistance = Math.abs(signal.entry - signal.stopLoss);
+        const slPercent = (slDistance / signal.entry) * 100;
+    
+        // Calculate risk amount in USD (например $1000 * 1% = $10)
+        const riskAmount = this.currentBalance * riskParams.riskPerTrade;
+    
+        // ИСПРАВЛЕНИЕ 1: Убираем "* riskParams.leverage"
+        // Size = Risk Amount / SL %
+        // Если риск $10, а стоп 1% (0.01), то позиция = $1000
+        const sizeUSD = (riskAmount / (slPercent / 100)); 
+    
+        // Calculate quantity in base asset
+        const quantity = sizeUSD / signal.entry;
+    
+        // Apply confidence adjustment
+        const adjustedSize = sizeUSD * signal.confidence;
+        const adjustedQuantity = quantity * signal.confidence;
+    
+        return {
+          size: adjustedSize,
+          quantity: adjustedQuantity,
+          risk: riskAmount,
+          riskPercent: riskParams.riskPerTrade * 100,
+          leverage: riskParams.leverage
+        };
     }
 
     /**
@@ -223,12 +224,19 @@ import {
       // Check if position size is reasonable
       const posSize = this.calculatePositionSize(signal, []);
       
+      const riskParams = config.getRiskConfig(); 
+
       if (posSize.size < 10) {
         return { valid: false, reason: 'Position size too small' };
       }
   
-      if (posSize.size > this.currentBalance * 0.5) {
-        return { valid: false, reason: 'Position size too large (>50% of balance)' };
+      const maxPositionSize = this.currentBalance * riskParams.leverage;
+      
+      if (posSize.size > maxPositionSize) {
+        return { 
+            valid: false, 
+            reason: `Position size $${posSize.size.toFixed(0)} exceeds max leverage cap ($${maxPositionSize.toFixed(0)})` 
+        };
       }
   
       // Check R:R ratio
@@ -241,7 +249,7 @@ import {
       }
   
       // Check confidence threshold
-      if (signal.confidence < 0.5) {
+      if (signal.confidence < 0.3) {
         return { valid: false, reason: 'Signal confidence too low' };
       }
   

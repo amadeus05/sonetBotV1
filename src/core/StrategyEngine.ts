@@ -177,6 +177,10 @@ import {
   
       // Take Profit: based on R:R ratio
       const takeProfit = this.riskManager.calculateTakeProfit(entry, stopLoss, isLong);
+      
+      // ИСПРАВЛЕНИЕ: Сначала считаем уверенность!
+      // Calculate confidence score
+      const confidence = this.calculateConfidence(analysis);
   
       // Calculate position size
       const tempSignal: TradingSignal = {
@@ -185,17 +189,14 @@ import {
         entry,
         stopLoss,
         takeProfit,
-        positionSize: 0, // Will be calculated
-        confidence: 0,   // Will be calculated
+        positionSize: 0, 
+        confidence: confidence, // <-- ИСПРАВЛЕНИЕ: Передаем рассчитанную уверенность
         timestamp: Date.now(),
         tags: [],
         metadata: analysis
       };
   
       const positionSize = this.riskManager.calculatePositionSize(tempSignal, candles);
-  
-      // Calculate confidence score
-      const confidence = this.calculateConfidence(analysis);
   
       // Generate tags
       const tags = this.generateTags(analysis);
@@ -206,7 +207,7 @@ import {
         entry,
         stopLoss,
         takeProfit,
-        positionSize: positionSize.size,
+        positionSize: positionSize.size, // Теперь здесь будет не 0
         confidence,
         timestamp: Date.now(),
         tags,
