@@ -17,8 +17,10 @@ import { db } from '../services/DatabaseManager';
 import { logger } from '../services/Logger';
 import { Helpers } from '../utils/Helpers';
 
-const MAX_TOTAL_MARGIN_COMMITMENT_RATIO = 0.5; // Максимум 50% от текущей эквити может быть задействовано под начальную маржу всех позиций.
-                                               // Это защитный механизм против чрезмерного использования маржи.
+const MAX_TOTAL_MARGIN_COMMITMENT_RATIO = 0.5; // Максимум 50% от текущей эквити может быть задействовано под начальную маржу.
+const MAX_TOTAL_RISK_EXPOSURE_RATIO = 0.06;    // Максимум 6% от баланса может быть под риском одновременно (суммарный риск).
+                                               // Если риск на сделку 1%, это позволит открыть макс 6 сделок.
+                                               // Если риск на сделку 2%, это позволит открыть макс 3 сделки.
 
 export class RiskManager {
   private currentBalance: number;
@@ -258,48 +260,63 @@ export class RiskManager {
    */
   public validateSignal(signal: TradingSignal): { valid: boolean; reason?: string } {
     const riskParams = config.getRiskConfig(); 
-    
-    // ИСПРАВЛЕНИЕ (Правка 5): Используем уже рассчитанный размер позиции из сигнала,
-    // вместо того чтобы пересчитывать его с пустым массивом свечей.
-    // Это избавляет от зависимости от candles в этом методе и предотвращает потенциальные баги.
-    const notionalSize = signal.positionSize;
+    const notionalSize = signal.positionSize; // Используем уже рассчитанный размер
 
     // 1. Проверка на минимальный номинальный размер позиции
-    if (notionalSize < 10) { // Binance часто имеет минимальный объем $10 или $5 для ордера
+    if (notionalSize < 10) { 
         return { valid: false, reason: `Position notional size too small (${notionalSize.toFixed(2)} USD). Minimum 10 USD.` };
     }
 
-    // ИСПРАВЛЕНИЕ (Правка 1): Проверка маржи
     // 2. Расчет маржи, необходимой для этой новой сделки
     const marginRequiredForNewTrade = notionalSize / riskParams.leverage;
 
-    // 3. Расчет общей маржи, уже используемой открытыми позициями
+    // 3. Расчет общей маржи и ОБЩЕГО РИСКА открытых позиций
     const openPositions = db.getOpenPositions();
     let totalMarginCurrentlyUsed = 0;
+    let totalRiskCurrentlyExposed = 0;
+
     for (const openPos of openPositions) {
-        // openPos.size - номинальный объем позиции (например, 1 BTC * $70000)
-        // openPos.leverage - плечо, используемое для этой конкретной позиции
+        // Margin
         totalMarginCurrentlyUsed += openPos.size / openPos.leverage;
+
+        // Risk ($) = |Entry - SL| * Quantity
+        // Quantity = Size (USD) / Entry
+        const quantity = openPos.size / openPos.entry;
+        const riskInDollars = Math.abs(openPos.entry - openPos.stopLoss) * quantity;
+        totalRiskCurrentlyExposed += riskInDollars;
     }
 
-    // 4. Текущая эквити счета (баланс + нереализованный PnL) с точки зрения RiskManager
+    // 4. Текущая эквити счета
     const currentEquity = this.currentBalance;
 
-    // 5. Проверка общего лимита маржинальных обязательств:
-    // Не позволяем суммарной марже превышать заданный процент от текущей эквити.
+    // 5. Проверка общего лимита маржинальных обязательств
     const maxTotalMarginAllowed = currentEquity * MAX_TOTAL_MARGIN_COMMITMENT_RATIO;
-    
     if (totalMarginCurrentlyUsed + marginRequiredForNewTrade > maxTotalMarginAllowed) {
         return { 
             valid: false, 
-            reason: `Opening new position would exceed total margin commitment of ${(MAX_TOTAL_MARGIN_COMMITMENT_RATIO * 100).toFixed(0)}% of equity. ` +
-                    `Currently used: ${Helpers.formatCurrency(totalMarginCurrentlyUsed, 0)}, ` +
-                    `new trade margin: ${Helpers.formatCurrency(marginRequiredForNewTrade, 0)}, ` +
-                    `max allowed: ${Helpers.formatCurrency(maxTotalMarginAllowed, 0)}` 
+            reason: `Margin commitment limit reached.` 
         };
     }
 
-    // 6. Проверка коэффициента R:R
+    // ИСПРАВЛЕНИЕ (Правка 6): Проверка Total Risk Exposure
+    // 6. Расчет риска новой сделки
+    const newTradeRiskDollar = (Math.abs(signal.entry - signal.stopLoss) / signal.entry) * notionalSize;
+    
+    // 7. Проверка: Текущий риск + Риск новой сделки <= Лимит (6% от баланса)
+    const maxTotalRiskAllowed = currentEquity * MAX_TOTAL_RISK_EXPOSURE_RATIO;
+    const projectedTotalRisk = totalRiskCurrentlyExposed + newTradeRiskDollar;
+
+    if (projectedTotalRisk > maxTotalRiskAllowed) {
+       return {
+         valid: false,
+         reason: `Total risk exposure limit exceeded. Projected: ${Helpers.formatCurrency(projectedTotalRisk)} ` +
+                 `(${((projectedTotalRisk/currentEquity)*100).toFixed(2)}%), ` +
+                 `Max allowed: ${Helpers.formatCurrency(maxTotalRiskAllowed)} ` +
+                 `(${MAX_TOTAL_RISK_EXPOSURE_RATIO*100}%)`
+       };
+    }
+
+    // 8. Проверка коэффициента R:R
     const rr = Helpers.calculateRR(signal.entry, signal.stopLoss, signal.takeProfit, 
                                    signal.type === 'LONG');
     const minRR = 1.5;
@@ -308,7 +325,7 @@ export class RiskManager {
       return { valid: false, reason: `R:R too low (${rr.toFixed(2)} < ${minRR})` };
     }
 
-    // 7. Проверка порога уверенности сигнала (фильтр)
+    // 9. Проверка порога уверенности сигнала
     if (signal.confidence < 0.3) {
       return { valid: false, reason: 'Signal confidence too low' };
     }
@@ -339,12 +356,19 @@ export class RiskManager {
   public getRiskSummary(): string {
     const drawdown = this.getCurrentDrawdown();
     const dailyPnL = this.getDailyPnL();
-    const openPositions = db.getOpenPositions().length;
+    const openPositions = db.getOpenPositions();
+    
+    // Calculate current risk exposure for display
+    let totalRisk = 0;
+    for (const p of openPositions) {
+       totalRisk += (Math.abs(p.entry - p.stopLoss) / p.entry) * p.size;
+    }
+    const riskPct = this.currentBalance > 0 ? (totalRisk / this.currentBalance) * 100 : 0;
 
     return `💰 Balance: ${Helpers.formatCurrency(this.currentBalance)} | ` +
            `📊 Daily P&L: ${Helpers.formatCurrency(dailyPnL)} | ` +
-           `📉 Drawdown: ${Helpers.formatPercent(drawdown)} (Peak-to-Valley) | ` +
-           `📈 Open: ${openPositions}`;
+           `📉 DD: ${Helpers.formatPercent(drawdown)} | ` +
+           `⚠️ Risk Exp: ${riskPct.toFixed(2)}%`;
   }
 
   /**
