@@ -138,6 +138,22 @@ export class DatabaseManager {
       )
     `);
 
+    // Historical candles cache table for backtest
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS historical_candles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL,
+        timeframe TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        open REAL NOT NULL,
+        high REAL NOT NULL,
+        low REAL NOT NULL,
+        close REAL NOT NULL,
+        volume REAL NOT NULL,
+        UNIQUE(symbol, timeframe, timestamp)
+      )
+    `);
+
     // Create indexes for better query performance
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
@@ -145,6 +161,7 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
       CREATE INDEX IF NOT EXISTS idx_trades_openTime ON trades(openTime);
       CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp);
+      CREATE INDEX IF NOT EXISTS idx_candles_lookup ON historical_candles(symbol, timeframe, timestamp);
     `);
   }
 
@@ -342,6 +359,74 @@ export class DatabaseManager {
       avgRR: result.avgRR || 0,
       totalPnL: result.totalPnL || 0
     };
+  }
+
+  // ============================================
+  // HISTORICAL CANDLES CACHE
+  // ============================================
+
+  /**
+   * Save candles to local cache (INSERT OR IGNORE to avoid duplicates)
+   */
+  public saveCandles(symbol: string, timeframe: string, candles: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[]): void {
+    if (candles.length === 0) return;
+
+    const insert = this.db.prepare(`
+      INSERT OR IGNORE INTO historical_candles (symbol, timeframe, timestamp, open, high, low, close, volume)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertMany = this.db.transaction((items: typeof candles) => {
+      for (const c of items) {
+        insert.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume);
+      }
+    });
+
+    insertMany(candles);
+    logger.info('Database', `Cached ${candles.length} candles for ${symbol}`);
+  }
+
+  /**
+   * Get candles from local cache
+   */
+  public getCandles(symbol: string, timeframe: string, startTime: number, endTime: number): { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[] {
+    const stmt = this.db.prepare(`
+      SELECT timestamp, open, high, low, close, volume
+      FROM historical_candles
+      WHERE symbol = ? AND timeframe = ? AND timestamp >= ? AND timestamp <= ?
+      ORDER BY timestamp ASC
+    `);
+
+    const rows = stmt.all(symbol, timeframe, startTime, endTime) as any[];
+    return rows.map(r => ({
+      timestamp: r.timestamp,
+      open: r.open,
+      high: r.high,
+      low: r.low,
+      close: r.close,
+      volume: r.volume
+    }));
+  }
+
+  /**
+   * Check if we have enough cached data for the given range
+   * Returns true if we have at least 80% of expected candles
+   */
+  public hasDataForRange(symbol: string, timeframe: string, startTime: number, endTime: number): boolean {
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) as count
+      FROM historical_candles
+      WHERE symbol = ? AND timeframe = ? AND timestamp >= ? AND timestamp <= ?
+    `);
+
+    const result = stmt.get(symbol, timeframe, startTime, endTime) as { count: number };
+
+    // Calculate expected candle count based on timeframe
+    const timeframeMs = timeframe === '15m' ? 15 * 60 * 1000 : 5 * 60 * 1000;
+    const expectedCount = Math.floor((endTime - startTime) / timeframeMs);
+
+    // Require at least 80% of expected candles to use cache
+    return result.count >= expectedCount * 0.8;
   }
 
   public close(): void {

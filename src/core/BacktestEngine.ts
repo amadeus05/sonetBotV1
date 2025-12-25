@@ -3,10 +3,10 @@
  * V6 FINAL: With Detailed Logs & Daily PnL
  */
 
-import { 
-    Candle, 
-    BacktestConfig, 
-    BacktestResult, 
+import {
+    Candle,
+    BacktestConfig,
+    BacktestResult,
     Position,
     PositionStatus,
     PositionSide,
@@ -15,9 +15,10 @@ import {
     TradingSignal
 } from '../types';
 
-import { StrategyEngine } from './StrategyEngine'; 
+import { StrategyEngine } from './StrategyEngine';
 import { RiskManager } from './RiskManager';
 import { BinanceService } from '../services/BinanceService';
+import { db } from '../services/DatabaseManager';
 import { logger } from '../services/Logger';
 import { Helpers } from '../utils/Helpers';
 import { config } from '../config/ConfigManager';
@@ -30,447 +31,466 @@ const SLIPPAGE_PERCENT = 0.0002;  // 0.02%
 const STRATEGY_LOOKBACK = 1000;   // Окно истории
 
 export class BacktestEngine {
-  private binance: BinanceService;
-  
-  // --- СОСТОЯНИЕ АККАУНТА ---
-  private walletBalance: number = 0; 
-  private freeBalance: number = 0;   
-  private lockedMargin: number = 0;  
-  
-  private activePositions: Position[] = []; 
-  private closedTrades: TradeResult[] = [];
-  
-  private equityCurve: { timestamp: number; balance: number, equity: number }[] = [];
-  private totalFeesPaid: number = 0;
+    private binance: BinanceService;
 
-  private maxRiskExposureRatio = 0.06; 
+    // --- СОСТОЯНИЕ АККАУНТА ---
+    private walletBalance: number = 0;
+    private freeBalance: number = 0;
+    private lockedMargin: number = 0;
 
-  constructor() {
-    this.binance = new BinanceService();
-  }
+    private activePositions: Position[] = [];
+    private closedTrades: TradeResult[] = [];
 
-  public async run(backtestConfig: BacktestConfig): Promise<BacktestResult> {
-    logger.info('Backtest', '🧪 Starting V6 (LOGGING) backtest...', {
-      symbols: backtestConfig.symbols.join(', '),
-      initialBalance: backtestConfig.initialBalance
-    });
+    private equityCurve: { timestamp: number; balance: number, equity: number }[] = [];
+    private totalFeesPaid: number = 0;
 
-    // 1. Инициализация
-    this.walletBalance = backtestConfig.initialBalance;
-    this.freeBalance = backtestConfig.initialBalance;
-    this.lockedMargin = 0;
-    
-    this.closedTrades = [];
-    this.activePositions = [];
-    this.totalFeesPaid = 0;
-    
-    this.equityCurve = [{ 
-        timestamp: backtestConfig.startDate.getTime(), 
-        balance: this.walletBalance, 
-        equity: this.walletBalance 
-    }];
+    private maxRiskExposureRatio = 0.06;
 
-    const riskManager = new RiskManager(backtestConfig.initialBalance);
-    const strategyEngine = new StrategyEngine(riskManager);
-
-    // 2. Загрузка данных
-    const marketData = await this.fetchAllMarketData(backtestConfig);
-    if (Object.keys(marketData).length === 0) throw new Error("No market data fetched");
-
-    // 3. Таймлайн
-    const allTimestamps = new Set<number>();
-    for (const symbol in marketData) {
-      marketData[symbol].forEach(c => allTimestamps.add(c.timestamp));
+    constructor() {
+        this.binance = new BinanceService();
     }
-    const timeline = Array.from(allTimestamps).sort((a, b) => a - b);
-    const cursor: Record<string, number> = {};
-    backtestConfig.symbols.forEach(s => cursor[s] = 0);
 
-    logger.info('Backtest', `Steps: ${timeline.length}`);
+    public async run(backtestConfig: BacktestConfig): Promise<BacktestResult> {
+        logger.info('Backtest', '🧪 Starting V6 (LOGGING) backtest...', {
+            symbols: backtestConfig.symbols.join(', '),
+            initialBalance: backtestConfig.initialBalance
+        });
 
-    // Переменные для Day PnL
-    let currentDayStr = '';
-    let startOfDayEquity = this.walletBalance;
+        // 1. Инициализация
+        this.walletBalance = backtestConfig.initialBalance;
+        this.freeBalance = backtestConfig.initialBalance;
+        this.lockedMargin = 0;
 
-    // === ГЛАВНЫЙ ЦИКЛ ===
-    for (let i = 0; i < timeline.length; i++) {
-      const currentTimestamp = timeline[i];
-      const maxOpenTrades = backtestConfig.risk.maxOpenTrades;
+        this.closedTrades = [];
+        this.activePositions = [];
+        this.totalFeesPaid = 0;
 
-      // 📅 ЛОГИКА СМЕНЫ ДНЯ (DAILY PNL)
-      const dateDate = new Date(currentTimestamp);
-      const dateStr = dateDate.toISOString().split('T')[0];
+        this.equityCurve = [{
+            timestamp: backtestConfig.startDate.getTime(),
+            balance: this.walletBalance,
+            equity: this.walletBalance
+        }];
 
-      const currentCandlesSnapshot = this.getSnapshot(marketData, cursor, currentTimestamp);
-      const currentEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot);
+        const riskManager = new RiskManager(backtestConfig.initialBalance);
+        const strategyEngine = new StrategyEngine(riskManager);
 
-      if (currentDayStr === '') {
-          currentDayStr = dateStr;
-      } else if (currentDayStr !== dateStr) {
-          // День закончился
-          const dailyPnL = currentEquity - startOfDayEquity;
-          const dailyPercent = (dailyPnL / startOfDayEquity) * 100;
-          
-          console.log(`\n📅 Day Finished: ${currentDayStr} | PnL: ${Helpers.formatCurrency(dailyPnL)} (${dailyPercent > 0 ? '+' : ''}${dailyPercent.toFixed(2)}%) | Eq: ${Helpers.formatCurrency(currentEquity)}`);
-          
-          currentDayStr = dateStr;
-          startOfDayEquity = currentEquity;
-      }
+        // 2. Загрузка данных
+        const marketData = await this.fetchAllMarketData(backtestConfig);
+        if (Object.keys(marketData).length === 0) throw new Error("No market data fetched");
 
-      // Прогресс бар
-      if (i % 2000 === 0) {
-          const percent = ((i / timeline.length) * 100).toFixed(1);
-          process.stdout.write(`\r[${percent}%] Eq: $${currentEquity.toFixed(0)} | Free: $${this.freeBalance.toFixed(0)} | Pos: ${this.activePositions.length}  `);
-      }
+        // 3. Таймлайн
+        const allTimestamps = new Set<number>();
+        for (const symbol in marketData) {
+            marketData[symbol].forEach(c => allTimestamps.add(c.timestamp));
+        }
+        const timeline = Array.from(allTimestamps).sort((a, b) => a - b);
+        const cursor: Record<string, number> = {};
+        backtestConfig.symbols.forEach(s => cursor[s] = 0);
 
-      // SYNC RISK MANAGER
-      (riskManager as any).currentBalance = currentEquity;
+        logger.info('Backtest', `Steps: ${timeline.length}`);
 
-      // A. ПРОВЕРКА ВЫХОДОВ
-      for (let j = this.activePositions.length - 1; j >= 0; j--) {
-          const position = this.activePositions[j];
-          const candle = currentCandlesSnapshot[position.symbol];
-          
-          if (!candle) continue;
-          if (candle.timestamp <= position.openTime) continue;
+        // Переменные для Day PnL
+        let currentDayStr = '';
+        let startOfDayEquity = this.walletBalance;
 
-          const result = this.checkPositionExit(position, candle);
-          
-          if (result) {
-              this.activePositions.splice(j, 1);
-              this.closedTrades.push(result);
-              
-              const marginReleased = position.size / position.leverage;
-              this.lockedMargin -= marginReleased;
-              
-              const cashReturn = marginReleased + result.position.pnl!;
-              this.freeBalance += cashReturn;
-              this.walletBalance = this.freeBalance + this.lockedMargin;
-              
-              // 📝 ЛОГИРОВАНИЕ СДЕЛКИ (ВОТ ОНО!)
-              const pnlStr = Helpers.formatCurrency(result.position.pnl!);
-              const emoji = result.won ? '✅' : '❌';
-              // Используем console.log для наглядности или logger для записи в файл
-              console.log(`\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} (${result.position.pnlPercent?.toFixed(2)}%) | Reason: ${result.position.exitReason}`);
-          }
-      }
+        // === ГЛАВНЫЙ ЦИКЛ ===
+        for (let i = 0; i < timeline.length; i++) {
+            const currentTimestamp = timeline[i];
+            const maxOpenTrades = backtestConfig.risk.maxOpenTrades;
 
-      // B. ПОИСК ВХОДОВ
-      if (this.activePositions.length < maxOpenTrades) {
-          
-          for (const symbol of backtestConfig.symbols) {
-              if (this.activePositions.length >= maxOpenTrades) break;
-              if (this.activePositions.some(p => p.symbol === symbol)) continue;
+            // 📅 ЛОГИКА СМЕНЫ ДНЯ (DAILY PNL)
+            const dateDate = new Date(currentTimestamp);
+            const dateStr = dateDate.toISOString().split('T')[0];
 
-              const candle = currentCandlesSnapshot[symbol];
-              const candleIndex = cursor[symbol];
-              if (!candle || candleIndex < 200) continue;
+            const currentCandlesSnapshot = this.getSnapshot(marketData, cursor, currentTimestamp);
+            const currentEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot);
 
-              const startIndex = Math.max(0, candleIndex - STRATEGY_LOOKBACK);
-              const historicalSlice = marketData[symbol].slice(startIndex, candleIndex + 1);
+            if (currentDayStr === '') {
+                currentDayStr = dateStr;
+            } else if (currentDayStr !== dateStr) {
+                // День закончился
+                const dailyPnL = currentEquity - startOfDayEquity;
+                const dailyPercent = (dailyPnL / startOfDayEquity) * 100;
 
-              const signal = await this.simulateStrategyAnalysis(
-                  symbol, 
-                  historicalSlice, 
-                  strategyEngine
-              );
+                console.log(`\n📅 Day Finished: ${currentDayStr} | PnL: ${Helpers.formatCurrency(dailyPnL)} (${dailyPercent > 0 ? '+' : ''}${dailyPercent.toFixed(2)}%) | Eq: ${Helpers.formatCurrency(currentEquity)}`);
 
-              if (signal) {
-                  this.tryOpenPosition(signal, candle, backtestConfig, currentEquity);
-              }
-          }
-      }
+                currentDayStr = dateStr;
+                startOfDayEquity = currentEquity;
+            }
 
-      // C. ЗАПИСЬ
-      const endTickEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot);
-      this.equityCurve.push({
-          timestamp: currentTimestamp,
-          balance: this.walletBalance,
-          equity: endTickEquity
-      });
-      
-      if (endTickEquity <= 0) {
-          console.log('\n💀 BANKRUPTCY! Equity reached 0.');
-          break;
-      }
+            // Прогресс бар
+            if (i % 2000 === 0) {
+                const percent = ((i / timeline.length) * 100).toFixed(1);
+                process.stdout.write(`\r[${percent}%] Eq: $${currentEquity.toFixed(0)} | Free: $${this.freeBalance.toFixed(0)} | Pos: ${this.activePositions.length}  `);
+            }
+
+            // SYNC RISK MANAGER
+            (riskManager as any).currentBalance = currentEquity;
+
+            // A. ПРОВЕРКА ВЫХОДОВ
+            for (let j = this.activePositions.length - 1; j >= 0; j--) {
+                const position = this.activePositions[j];
+                const candle = currentCandlesSnapshot[position.symbol];
+
+                if (!candle) continue;
+                if (candle.timestamp <= position.openTime) continue;
+
+                const result = this.checkPositionExit(position, candle);
+
+                if (result) {
+                    this.activePositions.splice(j, 1);
+                    this.closedTrades.push(result);
+
+                    const marginReleased = position.size / position.leverage;
+                    this.lockedMargin -= marginReleased;
+
+                    const cashReturn = marginReleased + result.position.pnl!;
+                    this.freeBalance += cashReturn;
+                    this.walletBalance = this.freeBalance + this.lockedMargin;
+
+                    // 📝 ЛОГИРОВАНИЕ СДЕЛКИ (ВОТ ОНО!)
+                    const pnlStr = Helpers.formatCurrency(result.position.pnl!);
+                    const emoji = result.won ? '✅' : '❌';
+                    // Используем console.log для наглядности или logger для записи в файл
+                    console.log(`\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} (${result.position.pnlPercent?.toFixed(2)}%) | Reason: ${result.position.exitReason}`);
+                }
+            }
+
+            // B. ПОИСК ВХОДОВ
+            if (this.activePositions.length < maxOpenTrades) {
+
+                for (const symbol of backtestConfig.symbols) {
+                    if (this.activePositions.length >= maxOpenTrades) break;
+                    if (this.activePositions.some(p => p.symbol === symbol)) continue;
+
+                    const candle = currentCandlesSnapshot[symbol];
+                    const candleIndex = cursor[symbol];
+                    if (!candle || candleIndex < 200) continue;
+
+                    const startIndex = Math.max(0, candleIndex - STRATEGY_LOOKBACK);
+                    const historicalSlice = marketData[symbol].slice(startIndex, candleIndex + 1);
+
+                    const signal = await this.simulateStrategyAnalysis(
+                        symbol,
+                        historicalSlice,
+                        strategyEngine
+                    );
+
+                    if (signal) {
+                        this.tryOpenPosition(signal, candle, backtestConfig, currentEquity);
+                    }
+                }
+            }
+
+            // C. ЗАПИСЬ
+            const endTickEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot);
+            this.equityCurve.push({
+                timestamp: currentTimestamp,
+                balance: this.walletBalance,
+                equity: endTickEquity
+            });
+
+            if (endTickEquity <= 0) {
+                console.log('\n💀 BANKRUPTCY! Equity reached 0.');
+                break;
+            }
+        }
+
+        console.log('\nSimulation finished.');
+        const result = this.calculateResults(backtestConfig);
+        this.saveResults(result);
+        this.displaySummary(result);
+
+        return result;
     }
-    
-    console.log('\nSimulation finished.');
-    const result = this.calculateResults(backtestConfig);
-    this.saveResults(result);
-    this.displaySummary(result);
 
-    return result;
-  }
+    // --- ЛОГИКА ---
 
-  // --- ЛОГИКА ---
+    private tryOpenPosition(signal: TradingSignal, candle: Candle, config: BacktestConfig, currentEquity: number) {
+        const leverage = config.risk.leverage;
+        const positionSizeUSDT = signal.positionSize;
+        const marginRequired = positionSizeUSDT / leverage;
+        const entryFee = positionSizeUSDT * BINANCE_TAKER_FEE;
 
-  private tryOpenPosition(signal: TradingSignal, candle: Candle, config: BacktestConfig, currentEquity: number) {
-      const leverage = config.risk.leverage;
-      const positionSizeUSDT = signal.positionSize; 
-      const marginRequired = positionSizeUSDT / leverage;
-      const entryFee = positionSizeUSDT * BINANCE_TAKER_FEE;
+        if (this.freeBalance < (marginRequired + entryFee)) return;
 
-      if (this.freeBalance < (marginRequired + entryFee)) return;
+        let currentRiskExposure = 0;
+        for (const pos of this.activePositions) {
+            const riskDollars = (Math.abs(pos.entry - pos.stopLoss) / pos.entry) * pos.size;
+            currentRiskExposure += riskDollars;
+        }
 
-      let currentRiskExposure = 0;
-      for (const pos of this.activePositions) {
-          const riskDollars = (Math.abs(pos.entry - pos.stopLoss) / pos.entry) * pos.size;
-          currentRiskExposure += riskDollars;
-      }
-      
-      const newTradeRisk = (Math.abs(signal.entry - signal.stopLoss) / signal.entry) * positionSizeUSDT;
-      const maxRiskAllowed = currentEquity * this.maxRiskExposureRatio;
+        const newTradeRisk = (Math.abs(signal.entry - signal.stopLoss) / signal.entry) * positionSizeUSDT;
+        const maxRiskAllowed = currentEquity * this.maxRiskExposureRatio;
 
-      if ((currentRiskExposure + newTradeRisk) > maxRiskAllowed) return; 
+        if ((currentRiskExposure + newTradeRisk) > maxRiskAllowed) return;
 
-      const position: Position = {
-          id: Helpers.generateId(),
-          symbol: signal.symbol,
-          side: signal.type === 'LONG' ? PositionSide.LONG : PositionSide.SHORT,
-          entry: signal.entry,
-          size: positionSizeUSDT,
-          leverage: leverage,
-          stopLoss: signal.stopLoss,
-          takeProfit: signal.takeProfit,
-          openTime: candle.timestamp,
-          status: PositionStatus.OPEN,
-          tags: signal.tags
-      };
+        const position: Position = {
+            id: Helpers.generateId(),
+            symbol: signal.symbol,
+            side: signal.type === 'LONG' ? PositionSide.LONG : PositionSide.SHORT,
+            entry: signal.entry,
+            size: positionSizeUSDT,
+            leverage: leverage,
+            stopLoss: signal.stopLoss,
+            takeProfit: signal.takeProfit,
+            openTime: candle.timestamp,
+            status: PositionStatus.OPEN,
+            tags: signal.tags
+        };
 
-      this.freeBalance -= (marginRequired + entryFee);
-      this.lockedMargin += marginRequired;
-      this.walletBalance = this.freeBalance + this.lockedMargin;
-      this.totalFeesPaid += entryFee;
+        this.freeBalance -= (marginRequired + entryFee);
+        this.lockedMargin += marginRequired;
+        this.walletBalance = this.freeBalance + this.lockedMargin;
+        this.totalFeesPaid += entryFee;
 
-      this.activePositions.push(position);
-      
-      // Лог открытия (опционально)
-      // console.log(`   🚀 Open ${position.symbol} ${position.side} @ ${position.entry}`);
-  }
+        this.activePositions.push(position);
 
-  private checkPositionExit(position: Position, currentCandle: Candle): TradeResult | null {
-      const isLong = position.side === PositionSide.LONG;
-      let exitReason: TradeExitReason | null = null;
-      let exitPrice = 0;
-      let isLiquidation = false;
-
-      const liqPriceLong = position.entry * (1 - (1 / position.leverage) + 0.005);
-      const liqPriceShort = position.entry * (1 + (1 / position.leverage) - 0.005);
-
-      if (isLong && currentCandle.low <= liqPriceLong) {
-          exitReason = TradeExitReason.STOP_LOSS;
-          exitPrice = liqPriceLong;
-          isLiquidation = true;
-      } else if (!isLong && currentCandle.high >= liqPriceShort) {
-          exitReason = TradeExitReason.STOP_LOSS;
-          exitPrice = liqPriceShort;
-          isLiquidation = true;
-      }
-
-      if (!exitReason) {
-          const hitSL_Long = currentCandle.low <= position.stopLoss;
-          const hitTP_Long = currentCandle.high >= position.takeProfit;
-          const hitSL_Short = currentCandle.high >= position.stopLoss;
-          const hitTP_Short = currentCandle.low <= position.takeProfit;
-
-          if (isLong) {
-              if (hitSL_Long) { 
-                  exitReason = TradeExitReason.STOP_LOSS; 
-                  exitPrice = position.stopLoss * (1 - SLIPPAGE_PERCENT); 
-              } else if (hitTP_Long) { 
-                  exitReason = TradeExitReason.TAKE_PROFIT; 
-                  exitPrice = position.takeProfit; 
-              }
-          } else {
-              if (hitSL_Short) { 
-                  exitReason = TradeExitReason.STOP_LOSS; 
-                  exitPrice = position.stopLoss * (1 + SLIPPAGE_PERCENT); 
-              } else if (hitTP_Short) { 
-                  exitReason = TradeExitReason.TAKE_PROFIT; 
-                  exitPrice = position.takeProfit; 
-              }
-          }
-      }
-  
-      if (!exitReason) return null;
-  
-      let netPnLValue = 0;
-      let exitFee = 0;
-
-      if (isLiquidation) {
-          const marginLocked = position.size / position.leverage;
-          netPnLValue = -marginLocked;
-          exitFee = 0; 
-      } else {
-          const pnlResult = Helpers.calculatePnL(position.entry, exitPrice, position.size, isLong, position.leverage);
-          const exitNotional = position.size * (exitPrice / position.entry);
-          exitFee = exitNotional * BINANCE_TAKER_FEE;
-          this.totalFeesPaid += exitFee;
-          netPnLValue = pnlResult.pnl - exitFee;
-      }
-
-      const entryFee = position.size * BINANCE_TAKER_FEE;
-      const absoluteNetPnL = netPnLValue - entryFee; 
-
-      position.closeTime = currentCandle.timestamp;
-      position.closePrice = exitPrice;
-      position.pnl = netPnLValue; 
-      position.pnlPercent = isLiquidation ? -100 : (netPnLValue / (position.size / position.leverage)) * 100;
-      position.status = PositionStatus.CLOSED;
-      position.exitReason = isLiquidation ? TradeExitReason.STOP_LOSS : exitReason;
-  
-      const rr = isLiquidation ? 0 : Helpers.calculateRR(position.entry, position.stopLoss, exitPrice, isLong);
-
-      return {
-        position,
-        won: absoluteNetPnL > 0, 
-        rr,
-        holdTime: position.closeTime - position.openTime,
-        slippage: isLiquidation ? 0 : Math.abs(position.stopLoss - exitPrice)
-      };
-  }
-
-  private calculateEquity(timestamp: number, currentPrices: Record<string, Candle>): number {
-      let floatingPnL = 0;
-      let estimatedExitFees = 0;
-
-      for (const pos of this.activePositions) {
-          const candle = currentPrices[pos.symbol];
-          if (candle) {
-              const currentPrice = candle.close;
-              const isLong = pos.side === PositionSide.LONG;
-              const pnlData = Helpers.calculatePnL(pos.entry, currentPrice, pos.size, isLong, pos.leverage);
-              floatingPnL += pnlData.pnl;
-              const exitNotional = pos.size * (currentPrice / pos.entry);
-              estimatedExitFees += exitNotional * BINANCE_TAKER_FEE;
-          }
-      }
-      return this.walletBalance + floatingPnL - estimatedExitFees;
-  }
-
-  private getSnapshot(data: Record<string, Candle[]>, cursor: Record<string, number>, timestamp: number): Record<string, Candle> {
-      const snapshot: Record<string, Candle> = {};
-      for (const symbol in data) {
-          const candles = data[symbol];
-          while(cursor[symbol] < candles.length - 1 && candles[cursor[symbol] + 1].timestamp <= timestamp) {
-              cursor[symbol]++;
-          }
-          if (candles[cursor[symbol]].timestamp === timestamp) {
-              snapshot[symbol] = candles[cursor[symbol]];
-          }
-      }
-      return snapshot;
-  }
-
-  private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: StrategyEngine): Promise<TradingSignal | null> {
-      const marketData = {
-          symbol,
-          candles: candles,
-          lastPrice: candles[candles.length - 1].close,
-          volume24h: 0, 
-          priceChange24h: 0
-      };
-      return await strategy.analyze(marketData);
-  }
-
-  private async fetchAllMarketData(config: BacktestConfig): Promise<Record<string, Candle[]>> {
-      const data: Record<string, Candle[]> = {};
-      logger.info('Backtest', 'Fetching historical data...');
-      for (const symbol of config.symbols) {
-          process.stdout.write(`Fetching ${symbol}... `);
-          const candles = await this.fetchHistoricalData(symbol, config.startDate, config.endDate);
-          if (candles.length > 0) {
-              data[symbol] = candles;
-              console.log(`OK (${candles.length})`);
-          } else console.log(`FAIL`);
-      }
-      console.log('');
-      return data;
-  }
-
-  private async fetchHistoricalData(symbol: string, startDate: Date, endDate: Date): Promise<Candle[]> {
-    const allCandles: Candle[] = [];
-    let currentTime = startDate.getTime();
-    const endTime = endDate.getTime();
-    const timeframe = config.getConfig().timeframe;
-    let timeframeMs = timeframe === '15m' ? 900000 : 300000;
-
-    while (currentTime < endTime) {
-      await Helpers.sleep(20);
-      const candles = await this.binance.getCandles(symbol, timeframe, 1000, currentTime);
-      if (candles.length === 0) break;
-      const filtered = candles.filter(c => c.timestamp >= startDate.getTime() && c.timestamp <= endDate.getTime());
-      allCandles.push(...filtered);
-      if (candles.length < 1000) break;
-      const lastCandleTime = candles[candles.length - 1].timestamp;
-      if (lastCandleTime >= endTime) break;
-      currentTime = lastCandleTime + timeframeMs;
+        // Лог открытия (опционально)
+        // console.log(`   🚀 Open ${position.symbol} ${position.side} @ ${position.entry}`);
     }
-    return allCandles.sort((a, b) => a.timestamp - b.timestamp);
-  }
 
-  private calculateResults(config: BacktestConfig): BacktestResult {
-    const results = this.closedTrades;
-    const wins = results.filter(r => r.won);
-    const losses = results.filter(r => !r.won);
-    const finalEquity = this.equityCurve.length > 0 ? this.equityCurve[this.equityCurve.length - 1].equity : config.initialBalance;
-    const totalPnL = finalEquity - config.initialBalance;
-    const avgWin = wins.length > 0 ? wins.reduce((sum, r) => sum + r.position.pnl!, 0) / wins.length : 0;
-    const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((sum, r) => sum + r.position.pnl!, 0) / losses.length) : 0;
-    const profitFactor = avgLoss > 0 ? avgWin / avgLoss : 0;
-    const winRate = results.length > 0 ? (wins.length / results.length) * 100 : 0;
-    
-    const returns = this.equityCurve.map((point, i) => {
-        if (i === 0) return 0;
-        const prev = this.equityCurve[i - 1].equity;
-        return ((point.equity - prev) / prev) * 100;
-    });
-    
-    const equities = this.equityCurve.map(p => p.equity);
-    const maxDD = Helpers.maxDrawdown(equities);
+    private checkPositionExit(position: Position, currentCandle: Candle): TradeResult | null {
+        const isLong = position.side === PositionSide.LONG;
+        let exitReason: TradeExitReason | null = null;
+        let exitPrice = 0;
+        let isLiquidation = false;
 
-    return {
-      totalTrades: results.length,
-      winningTrades: wins.length,
-      losingTrades: losses.length,
-      winRate,
-      averageWin: avgWin,
-      averageLoss: avgLoss,
-      averageRR: 0,
-      profitFactor,
-      finalBalance: finalEquity,
-      totalPnL,
-      totalPnLPercent: (totalPnL / config.initialBalance) * 100,
-      maxDrawdown: maxDD.amount,
-      maxDrawdownPercent: maxDD.percent,
-      sharpeRatio: Helpers.sharpeRatio(returns),
-      trades: results,
-      equityCurve: this.equityCurve
-    };
-  }
+        const liqPriceLong = position.entry * (1 - (1 / position.leverage) + 0.005);
+        const liqPriceShort = position.entry * (1 + (1 / position.leverage) - 0.005);
 
-  private saveResults(result: BacktestResult): void {
-    const resultsDir = './backtest-results';
-    if (!fs.existsSync(resultsDir)) fs.mkdirSync(resultsDir, { recursive: true });
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    fs.writeFileSync(path.join(resultsDir, `backtest-${timestamp}.json`), JSON.stringify(result, null, 2));
-  }
+        if (isLong && currentCandle.low <= liqPriceLong) {
+            exitReason = TradeExitReason.STOP_LOSS;
+            exitPrice = liqPriceLong;
+            isLiquidation = true;
+        } else if (!isLong && currentCandle.high >= liqPriceShort) {
+            exitReason = TradeExitReason.STOP_LOSS;
+            exitPrice = liqPriceShort;
+            isLiquidation = true;
+        }
 
-  private displaySummary(result: BacktestResult): void {
-    console.log('\n╔═══════════════════════════════════════════════════════════╗');
-    console.log('║           PORTFOLIO BACKTEST RESULTS (V6 LOGS)            ║');
-    console.log('╚═══════════════════════════════════════════════════════════╝\n');
-    console.log(`📊 Trades: ${result.totalTrades} (W: ${result.winningTrades} / L: ${result.losingTrades})`);
-    console.log(`   Win Rate: ${result.winRate.toFixed(2)}%`);
-    console.log(`💰 Equity:`);
-    console.log(`   Start: ${Helpers.formatCurrency(this.equityCurve[0].equity)}`);
-    console.log(`   End:   ${Helpers.formatCurrency(result.finalBalance)}`);
-    console.log(`   PnL:   ${Helpers.formatCurrency(result.totalPnL)} (${result.totalPnLPercent.toFixed(2)}%)`);
-    console.log(`   Fees:  ${Helpers.formatCurrency(this.totalFeesPaid)}`);
-    console.log(`📉 Risk:`);
-    console.log(`   Max DD: ${result.maxDrawdownPercent.toFixed(2)}%`);
-    console.log(`   Profit Factor: ${result.profitFactor.toFixed(2)}`);
-    console.log(`   Sharpe: ${result.sharpeRatio.toFixed(2)}\n`);
-  }
+        if (!exitReason) {
+            const hitSL_Long = currentCandle.low <= position.stopLoss;
+            const hitTP_Long = currentCandle.high >= position.takeProfit;
+            const hitSL_Short = currentCandle.high >= position.stopLoss;
+            const hitTP_Short = currentCandle.low <= position.takeProfit;
+
+            if (isLong) {
+                if (hitSL_Long) {
+                    exitReason = TradeExitReason.STOP_LOSS;
+                    exitPrice = position.stopLoss * (1 - SLIPPAGE_PERCENT);
+                } else if (hitTP_Long) {
+                    exitReason = TradeExitReason.TAKE_PROFIT;
+                    exitPrice = position.takeProfit;
+                }
+            } else {
+                if (hitSL_Short) {
+                    exitReason = TradeExitReason.STOP_LOSS;
+                    exitPrice = position.stopLoss * (1 + SLIPPAGE_PERCENT);
+                } else if (hitTP_Short) {
+                    exitReason = TradeExitReason.TAKE_PROFIT;
+                    exitPrice = position.takeProfit;
+                }
+            }
+        }
+
+        if (!exitReason) return null;
+
+        let netPnLValue = 0;
+        let exitFee = 0;
+
+        if (isLiquidation) {
+            const marginLocked = position.size / position.leverage;
+            netPnLValue = -marginLocked;
+            exitFee = 0;
+        } else {
+            const pnlResult = Helpers.calculatePnL(position.entry, exitPrice, position.size, isLong, position.leverage);
+            const exitNotional = position.size * (exitPrice / position.entry);
+            exitFee = exitNotional * BINANCE_TAKER_FEE;
+            this.totalFeesPaid += exitFee;
+            netPnLValue = pnlResult.pnl - exitFee;
+        }
+
+        const entryFee = position.size * BINANCE_TAKER_FEE;
+        const absoluteNetPnL = netPnLValue - entryFee;
+
+        position.closeTime = currentCandle.timestamp;
+        position.closePrice = exitPrice;
+        position.pnl = netPnLValue;
+        position.pnlPercent = isLiquidation ? -100 : (netPnLValue / (position.size / position.leverage)) * 100;
+        position.status = PositionStatus.CLOSED;
+        position.exitReason = isLiquidation ? TradeExitReason.STOP_LOSS : exitReason;
+
+        const rr = isLiquidation ? 0 : Helpers.calculateRR(position.entry, position.stopLoss, exitPrice, isLong);
+
+        return {
+            position,
+            won: absoluteNetPnL > 0,
+            rr,
+            holdTime: position.closeTime - position.openTime,
+            slippage: isLiquidation ? 0 : Math.abs(position.stopLoss - exitPrice)
+        };
+    }
+
+    private calculateEquity(timestamp: number, currentPrices: Record<string, Candle>): number {
+        let floatingPnL = 0;
+        let estimatedExitFees = 0;
+
+        for (const pos of this.activePositions) {
+            const candle = currentPrices[pos.symbol];
+            if (candle) {
+                const currentPrice = candle.close;
+                const isLong = pos.side === PositionSide.LONG;
+                const pnlData = Helpers.calculatePnL(pos.entry, currentPrice, pos.size, isLong, pos.leverage);
+                floatingPnL += pnlData.pnl;
+                const exitNotional = pos.size * (currentPrice / pos.entry);
+                estimatedExitFees += exitNotional * BINANCE_TAKER_FEE;
+            }
+        }
+        return this.walletBalance + floatingPnL - estimatedExitFees;
+    }
+
+    private getSnapshot(data: Record<string, Candle[]>, cursor: Record<string, number>, timestamp: number): Record<string, Candle> {
+        const snapshot: Record<string, Candle> = {};
+        for (const symbol in data) {
+            const candles = data[symbol];
+            while (cursor[symbol] < candles.length - 1 && candles[cursor[symbol] + 1].timestamp <= timestamp) {
+                cursor[symbol]++;
+            }
+            if (candles[cursor[symbol]].timestamp === timestamp) {
+                snapshot[symbol] = candles[cursor[symbol]];
+            }
+        }
+        return snapshot;
+    }
+
+    private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: StrategyEngine): Promise<TradingSignal | null> {
+        const marketData = {
+            symbol,
+            candles: candles,
+            lastPrice: candles[candles.length - 1].close,
+            volume24h: 0,
+            priceChange24h: 0
+        };
+        return await strategy.analyze(marketData);
+    }
+
+    private async fetchAllMarketData(config: BacktestConfig): Promise<Record<string, Candle[]>> {
+        const data: Record<string, Candle[]> = {};
+        logger.info('Backtest', 'Fetching historical data...');
+        for (const symbol of config.symbols) {
+            process.stdout.write(`Fetching ${symbol}... `);
+            const candles = await this.fetchHistoricalData(symbol, config.startDate, config.endDate);
+            if (candles.length > 0) {
+                data[symbol] = candles;
+                console.log(`OK (${candles.length})`);
+            } else console.log(`FAIL`);
+        }
+        console.log('');
+        return data;
+    }
+
+    private async fetchHistoricalData(symbol: string, startDate: Date, endDate: Date): Promise<Candle[]> {
+        const timeframe = config.getConfig().timeframe;
+        const startTime = startDate.getTime();
+        const endTime = endDate.getTime();
+
+        // 1. Check if we have cached data
+        if (db.hasDataForRange(symbol, timeframe, startTime, endTime)) {
+            const cached = db.getCandles(symbol, timeframe, startTime, endTime);
+            console.log(`[CACHE] Using cached data (${cached.length} candles)`);
+            return cached as Candle[];
+        }
+
+        // 2. Fetch from Binance API
+        console.log(`[API] Loading from Binance...`);
+        const allCandles: Candle[] = [];
+        let currentTime = startTime;
+        let timeframeMs = timeframe === '15m' ? 900000 : 300000;
+
+        while (currentTime < endTime) {
+            await Helpers.sleep(20);
+            const candles = await this.binance.getCandles(symbol, timeframe, 1000, currentTime);
+            if (candles.length === 0) break;
+            const filtered = candles.filter(c => c.timestamp >= startTime && c.timestamp <= endTime);
+            allCandles.push(...filtered);
+            if (candles.length < 1000) break;
+            const lastCandleTime = candles[candles.length - 1].timestamp;
+            if (lastCandleTime >= endTime) break;
+            currentTime = lastCandleTime + timeframeMs;
+        }
+
+        const sorted = allCandles.sort((a, b) => a.timestamp - b.timestamp);
+
+        // 3. Save to cache for future use
+        if (sorted.length > 0) {
+            db.saveCandles(symbol, timeframe, sorted);
+        }
+
+        return sorted;
+    }
+
+    private calculateResults(config: BacktestConfig): BacktestResult {
+        const results = this.closedTrades;
+        const wins = results.filter(r => r.won);
+        const losses = results.filter(r => !r.won);
+        const finalEquity = this.equityCurve.length > 0 ? this.equityCurve[this.equityCurve.length - 1].equity : config.initialBalance;
+        const totalPnL = finalEquity - config.initialBalance;
+        const avgWin = wins.length > 0 ? wins.reduce((sum, r) => sum + r.position.pnl!, 0) / wins.length : 0;
+        const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((sum, r) => sum + r.position.pnl!, 0) / losses.length) : 0;
+        const profitFactor = avgLoss > 0 ? avgWin / avgLoss : 0;
+        const winRate = results.length > 0 ? (wins.length / results.length) * 100 : 0;
+
+        const returns = this.equityCurve.map((point, i) => {
+            if (i === 0) return 0;
+            const prev = this.equityCurve[i - 1].equity;
+            return ((point.equity - prev) / prev) * 100;
+        });
+
+        const equities = this.equityCurve.map(p => p.equity);
+        const maxDD = Helpers.maxDrawdown(equities);
+
+        return {
+            totalTrades: results.length,
+            winningTrades: wins.length,
+            losingTrades: losses.length,
+            winRate,
+            averageWin: avgWin,
+            averageLoss: avgLoss,
+            averageRR: 0,
+            profitFactor,
+            finalBalance: finalEquity,
+            totalPnL,
+            totalPnLPercent: (totalPnL / config.initialBalance) * 100,
+            maxDrawdown: maxDD.amount,
+            maxDrawdownPercent: maxDD.percent,
+            sharpeRatio: Helpers.sharpeRatio(returns),
+            trades: results,
+            equityCurve: this.equityCurve
+        };
+    }
+
+    private saveResults(result: BacktestResult): void {
+        const resultsDir = './backtest-results';
+        if (!fs.existsSync(resultsDir)) fs.mkdirSync(resultsDir, { recursive: true });
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        fs.writeFileSync(path.join(resultsDir, `backtest-${timestamp}.json`), JSON.stringify(result, null, 2));
+    }
+
+    private displaySummary(result: BacktestResult): void {
+        console.log('\n╔═══════════════════════════════════════════════════════════╗');
+        console.log('║           PORTFOLIO BACKTEST RESULTS (V6 LOGS)            ║');
+        console.log('╚═══════════════════════════════════════════════════════════╝\n');
+        console.log(`📊 Trades: ${result.totalTrades} (W: ${result.winningTrades} / L: ${result.losingTrades})`);
+        console.log(`   Win Rate: ${result.winRate.toFixed(2)}%`);
+        console.log(`💰 Equity:`);
+        console.log(`   Start: ${Helpers.formatCurrency(this.equityCurve[0].equity)}`);
+        console.log(`   End:   ${Helpers.formatCurrency(result.finalBalance)}`);
+        console.log(`   PnL:   ${Helpers.formatCurrency(result.totalPnL)} (${result.totalPnLPercent.toFixed(2)}%)`);
+        console.log(`   Fees:  ${Helpers.formatCurrency(this.totalFeesPaid)}`);
+        console.log(`📉 Risk:`);
+        console.log(`   Max DD: ${result.maxDrawdownPercent.toFixed(2)}%`);
+        console.log(`   Profit Factor: ${result.profitFactor.toFixed(2)}`);
+        console.log(`   Sharpe: ${result.sharpeRatio.toFixed(2)}\n`);
+    }
 }
