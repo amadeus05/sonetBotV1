@@ -8,20 +8,27 @@ import { Candle, MarketRegime } from '../types';
 import { TechnicalIndicators } from '../utils/TechnicalIndicators';
 import { Helpers } from '../utils/Helpers';
 
+// Константы периодов для индикаторов
+const ADX_PERIOD = 14;
+const VOLATILITY_PERIOD = 20;
+// Минимально необходимое количество свечей: Максимум из требований ADX (period * 2) и Volatility
+const MIN_CANDLES_REQUIRED = Math.max(ADX_PERIOD * 2, VOLATILITY_PERIOD);
+
 export class RegimeDetector {
   /**
    * Detect current market regime
    */
   public detect(candles: Candle[]): MarketRegime {
-    if (candles.length < 50) {
+    // ИСПРАВЛЕНИЕ: Проверка основана на реальных требованиях индикаторов, а не на произвольном числе 50
+    if (candles.length < MIN_CANDLES_REQUIRED) {
       return MarketRegime.UNKNOWN;
     }
 
     // Calculate ADX (Average Directional Index) for trend strength
-    const adx = this.calculateSimpleADX(candles);
+    const adx = this.calculateSimpleADX(candles, ADX_PERIOD);
 
     // Calculate volatility
-    const volatility = this.calculateVolatility(candles);
+    const volatility = this.calculateVolatility(candles, VOLATILITY_PERIOD);
 
     // Determine regime based on ADX and volatility
     return this.classifyRegime(adx, volatility);
@@ -72,14 +79,17 @@ export class RegimeDetector {
   /**
    * Calculate market volatility
    */
-  private calculateVolatility(candles: Candle[]): number {
-    if (candles.length < 20) return 0;
+  private calculateVolatility(candles: Candle[], period: number = 20): number {
+    if (candles.length < period) return 0;
 
     const closes = candles.map(c => c.close);
+    // Берем только последние N свечей для расчета волатильности
+    const recentCloses = closes.slice(-period);
+    
     const returns: number[] = [];
 
-    for (let i = 1; i < closes.length; i++) {
-      const returnPct = (closes[i] - closes[i - 1]) / closes[i - 1];
+    for (let i = 1; i < recentCloses.length; i++) {
+      const returnPct = (recentCloses[i] - recentCloses[i - 1]) / recentCloses[i - 1];
       returns.push(returnPct);
     }
 
@@ -134,7 +144,8 @@ export class RegimeDetector {
    * Get regime strength score (0-1)
    */
   public getRegimeStrength(candles: Candle[], regime: MarketRegime): number {
-    const adx = this.calculateSimpleADX(candles);
+    // Используем константу ADX_PERIOD
+    const adx = this.calculateSimpleADX(candles, ADX_PERIOD);
 
     switch (regime) {
       case MarketRegime.TRENDING:
@@ -147,7 +158,7 @@ export class RegimeDetector {
       
       case MarketRegime.VOLATILE:
         // Based on volatility
-        const volatility = this.calculateVolatility(candles);
+        const volatility = this.calculateVolatility(candles, VOLATILITY_PERIOD);
         return Math.min(volatility / 5, 1);
       
       default:
@@ -167,7 +178,7 @@ export class RegimeDetector {
     };
 
     const strength = this.getRegimeStrength(candles, regime);
-    const adx = this.calculateSimpleADX(candles);
+    const adx = this.calculateSimpleADX(candles, ADX_PERIOD);
 
     return `${regimeEmoji[regime]} ${regime} | ADX: ${adx.toFixed(1)} | Strength: ${(strength * 100).toFixed(0)}%`;
   }
