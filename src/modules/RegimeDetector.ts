@@ -6,7 +6,6 @@
 
 import { Candle, MarketRegime } from '../types';
 import { TechnicalIndicators } from '../utils/TechnicalIndicators';
-import { Helpers } from '../utils/Helpers';
 
 // Константы периодов для индикаторов
 const ADX_PERIOD = 14;
@@ -94,11 +93,6 @@ export class RegimeDetector {
     }
 
     // Calculate first DX to start the ADX smoothing chain
-    // (Optimization: We need a series of DX values to smooth them into ADX)
-    
-    // We need to calculate rolling values starting from index `period`
-    // Wilder's Smoothing: Previous * (n-1)/n + Current
-    // Or equivalently: Previous - (Previous/n) + Current
     
     const dxList: number[] = [];
 
@@ -115,7 +109,6 @@ export class RegimeDetector {
     dxList.push(calcDX(smoothPlusDM, smoothMinusDM, smoothTR));
 
     // 3. Calculate rolling Smoothed TR, +/-DM and subsequent DXs
-    // Loop through the rest of the data
     for (let i = period; i < trs.length; i++) {
       const currentTR = trs[i];
       const currentPlusDM = plusDMs[i];
@@ -130,7 +123,7 @@ export class RegimeDetector {
     }
 
     // 4. Calculate ADX (Smoothing the DX values)
-    if (dxList.length < period) return dxList[dxList.length - 1]; // Not enough data for full ADX
+    if (dxList.length < period) return dxList[dxList.length - 1];
 
     // First ADX is average of first 'period' DX values
     let adx = dxList.slice(0, period).reduce((sum, val) => sum + val, 0) / period;
@@ -144,19 +137,21 @@ export class RegimeDetector {
   }
 
   /**
-   * Calculate market volatility
+   * Calculate market volatility using a rolling window
+   * Now strictly uses only the last 'period' candles to avoid regime stickiness.
    */
   private calculateVolatility(candles: Candle[], period: number = 20): number {
     if (candles.length < period) return 0;
 
-    const closes = candles.map(c => c.close);
-    // Берем только последние N свечей для расчета волатильности
-    const recentCloses = closes.slice(-period);
+    // ИСПРАВЛЕНИЕ: Сначала берем срез последних N свечей, а не мапим весь массив.
+    // Это гарантирует расчет волатильности только для локального окна.
+    const recentCandles = candles.slice(-period);
+    const closes = recentCandles.map(c => c.close);
     
     const returns: number[] = [];
 
-    for (let i = 1; i < recentCloses.length; i++) {
-      const returnPct = (recentCloses[i] - recentCloses[i - 1]) / recentCloses[i - 1];
+    for (let i = 1; i < closes.length; i++) {
+      const returnPct = (closes[i] - closes[i - 1]) / closes[i - 1];
       returns.push(returnPct);
     }
 
