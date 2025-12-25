@@ -23,12 +23,14 @@ const MAX_TOTAL_MARGIN_COMMITMENT_RATIO = 0.5; // Максимум 50% от те
 export class RiskManager {
   private currentBalance: number;
   private dailyStartBalance: number; // Баланс на начало дня для фиксации лимита потерь
+  private peakBalance: number;       // Максимальный баланс (High Watermark) для расчета DD
   private dailyPnL: number = 0;
   private lastResetDate: string = '';
 
   constructor(initialBalance: number) {
     this.currentBalance = initialBalance;
-    this.dailyStartBalance = initialBalance; // Инициализируем стартовым балансом
+    this.dailyStartBalance = initialBalance;
+    this.peakBalance = initialBalance; // Инициализируем пик начальным балансом
     this.resetDailyPnL();
   }
 
@@ -160,7 +162,10 @@ export class RiskManager {
 
     // Check drawdown limit
     if (this.hasExceededMaxDrawdown()) {
-      logger.warn('RiskManager', 'Maximum drawdown exceeded');
+      logger.warn('RiskManager', 'Maximum drawdown exceeded', {
+        currentDrawdown: this.getCurrentDrawdown().toFixed(2),
+        maxDrawdown: riskParams.maxDrawdown * 100
+      });
       return false;
     }
 
@@ -174,19 +179,18 @@ export class RiskManager {
     this.resetDailyPnL();
     const riskParams = config.getRiskConfig();
     
-    // ИСПРАВЛЕНИЕ: Считаем лимит от баланса на НАЧАЛО дня, а не от текущего
+    // ИСПРАВЛЕНИЕ: Считаем лимит от баланса на НАЧАЛО дня
     const maxDailyLoss = this.dailyStartBalance * riskParams.maxDailyLoss;
 
     return this.dailyPnL <= -maxDailyLoss;
   }
 
   /**
-   * Check if max drawdown exceeded
+   * Check if max drawdown exceeded (Peak-to-Valley)
    */
   private hasExceededMaxDrawdown(): boolean {
     const riskParams = config.getRiskConfig();
-    const initialBalance = riskParams.accountBalance;
-    const drawdown = ((initialBalance - this.currentBalance) / initialBalance) * 100;
+    const drawdown = this.getCurrentDrawdown();
 
     return drawdown >= (riskParams.maxDrawdown * 100);
   }
@@ -198,10 +202,16 @@ export class RiskManager {
     this.currentBalance += pnl;
     this.dailyPnL += pnl;
 
+    // ИСПРАВЛЕНИЕ: Обновляем High Watermark (максимальный баланс)
+    if (this.currentBalance > this.peakBalance) {
+      this.peakBalance = this.currentBalance;
+    }
+
     logger.info('RiskManager', 'Balance updated', {
       pnl: Helpers.formatCurrency(pnl),
       newBalance: Helpers.formatCurrency(this.currentBalance),
-      dailyPnL: Helpers.formatCurrency(this.dailyPnL)
+      dailyPnL: Helpers.formatCurrency(this.dailyPnL),
+      peakBalance: Helpers.formatCurrency(this.peakBalance)
     });
   }
 
@@ -235,12 +245,12 @@ export class RiskManager {
   }
 
   /**
-   * Calculate current drawdown
+   * Calculate current drawdown (Peak-to-Valley)
    */
   public getCurrentDrawdown(): number {
-    const riskParams = config.getRiskConfig();
-    const initialBalance = riskParams.accountBalance;
-    return ((initialBalance - this.currentBalance) / initialBalance) * 100;
+    if (this.peakBalance === 0) return 0;
+    // (Peak - Current) / Peak * 100
+    return ((this.peakBalance - this.currentBalance) / this.peakBalance) * 100;
   }
 
   /**
@@ -331,7 +341,7 @@ export class RiskManager {
 
     return `💰 Balance: ${Helpers.formatCurrency(this.currentBalance)} | ` +
            `📊 Daily P&L: ${Helpers.formatCurrency(dailyPnL)} | ` +
-           `📉 Drawdown: ${Helpers.formatPercent(drawdown)} | ` +
+           `📉 Drawdown: ${Helpers.formatPercent(drawdown)} (Peak-to-Valley) | ` +
            `📈 Open: ${openPositions}`;
   }
 
