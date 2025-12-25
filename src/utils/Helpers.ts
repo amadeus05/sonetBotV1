@@ -60,7 +60,9 @@ export class Helpers {
    * Format currency
    */
   public static formatCurrency(amount: number, decimals: number = 2): string {
-    const sign = amount >= 0 ? '+' : '';
+    const sign = amount >= 0 ? '+' : '-'; 
+    
+    // Math.abs убирает знак самого числа, поэтому мы добавляем его вручную через переменную sign
     return `${sign}$${this.formatNumber(Math.abs(amount), decimals)}`;
   }
 
