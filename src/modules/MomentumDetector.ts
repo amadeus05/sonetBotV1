@@ -97,14 +97,14 @@ export class MomentumDetector {
     // Volume spike condition
     const volumeSpike = volumeRatio >= config.volumeSpikeMultiplier;
 
-    // Significant price movement
-    const significantMove = Math.abs(priceChange) >= 2; // At least 2% move
+    // ИСПРАВЛЕНИЕ: Снижаем порог значимого движения с 2% до 0.3%
+    const significantMove = Math.abs(priceChange) >= 0.3; 
 
-    // Momentum spike requires at least 2 of 3 conditions
-    const conditions = [rsiExtreme, volumeSpike, significantMove];
-    const metConditions = conditions.filter(Boolean).length;
-
-    return metConditions >= 2;
+    // Momentum spike requires at least 1 condition (Relaxed mode)
+    // БЫЛО: const metConditions = conditions.filter(Boolean).length; return metConditions >= 2;
+    
+    // СТАЛО: Достаточно хотя бы одного признака импульса
+    return rsiExtreme || volumeSpike || significantMove;
   }
 
   /**
