@@ -258,9 +258,11 @@ export class RiskManager {
    */
   public validateSignal(signal: TradingSignal): { valid: boolean; reason?: string } {
     const riskParams = config.getRiskConfig(); 
-    const posSizeCalculation = this.calculatePositionSize(signal, []); // Это возвращает номинальный объем позиции (size) с учетом confidence множителя
-
-    const notionalSize = posSizeCalculation.size; // Номинальный объем для новой позиции
+    
+    // ИСПРАВЛЕНИЕ (Правка 5): Используем уже рассчитанный размер позиции из сигнала,
+    // вместо того чтобы пересчитывать его с пустым массивом свечей.
+    // Это избавляет от зависимости от candles в этом методе и предотвращает потенциальные баги.
+    const notionalSize = signal.positionSize;
 
     // 1. Проверка на минимальный номинальный размер позиции
     if (notionalSize < 10) { // Binance часто имеет минимальный объем $10 или $5 для ордера
