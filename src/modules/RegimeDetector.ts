@@ -11,7 +11,9 @@ import { Helpers } from '../utils/Helpers';
 // Константы периодов для индикаторов
 const ADX_PERIOD = 14;
 const VOLATILITY_PERIOD = 20;
-// Минимально необходимое количество свечей: Максимум из требований ADX (period * 2) и Volatility
+// Минимально необходимое количество свечей:
+// Для стабильного ADX нужно больше данных для сходимости EMA (обычно period * 3 или 4 дает лучший результат)
+// Но минимум period * 2 достаточен для старта расчета.
 const MIN_CANDLES_REQUIRED = Math.max(ADX_PERIOD * 2, VOLATILITY_PERIOD);
 
 export class RegimeDetector {
@@ -19,13 +21,12 @@ export class RegimeDetector {
    * Detect current market regime
    */
   public detect(candles: Candle[]): MarketRegime {
-    // ИСПРАВЛЕНИЕ: Проверка основана на реальных требованиях индикаторов, а не на произвольном числе 50
     if (candles.length < MIN_CANDLES_REQUIRED) {
       return MarketRegime.UNKNOWN;
     }
 
-    // Calculate ADX (Average Directional Index) for trend strength
-    const adx = this.calculateSimpleADX(candles, ADX_PERIOD);
+    // Calculate standard Wilder's ADX
+    const adx = this.calculateStandardADX(candles, ADX_PERIOD);
 
     // Calculate volatility
     const volatility = this.calculateVolatility(candles, VOLATILITY_PERIOD);
@@ -35,45 +36,111 @@ export class RegimeDetector {
   }
 
   /**
-   * Simple ADX calculation
-   * ADX > 25 = trending
-   * ADX < 20 = ranging
+   * Standard Wilder's ADX Calculation
+   * Implements the full algorithm:
+   * 1. TR, +DM, -DM
+   * 2. Smoothed TR, +DM, -DM (Wilder's Smoothing)
+   * 3. +DI, -DI
+   * 4. DX
+   * 5. ADX (Smoothed DX)
    */
-  private calculateSimpleADX(candles: Candle[], period: number = 14): number {
+  private calculateStandardADX(candles: Candle[], period: number): number {
     if (candles.length < period * 2) return 0;
 
-    const recentCandles = candles.slice(-period * 2);
-    
-    // Calculate +DM and -DM
-    let plusDM = 0;
-    let minusDM = 0;
+    const trs: number[] = [];
+    const plusDMs: number[] = [];
+    const minusDMs: number[] = [];
 
-    for (let i = 1; i < recentCandles.length; i++) {
-      const highDiff = recentCandles[i].high - recentCandles[i - 1].high;
-      const lowDiff = recentCandles[i - 1].low - recentCandles[i].low;
+    // 1. Calculate Raw TR, +DM, -DM
+    for (let i = 1; i < candles.length; i++) {
+      const curr = candles[i];
+      const prev = candles[i - 1];
 
-      if (highDiff > lowDiff && highDiff > 0) {
-        plusDM += highDiff;
+      // True Range
+      const tr = Math.max(
+        curr.high - curr.low,
+        Math.abs(curr.high - prev.close),
+        Math.abs(curr.low - prev.close)
+      );
+      trs.push(tr);
+
+      // Directional Movement
+      const up = curr.high - prev.high;
+      const down = prev.low - curr.low;
+
+      let plusDM = 0;
+      let minusDM = 0;
+
+      if (up > down && up > 0) {
+        plusDM = up;
       }
-      if (lowDiff > highDiff && lowDiff > 0) {
-        minusDM += lowDiff;
+      if (down > up && down > 0) {
+        minusDM = down;
       }
+
+      plusDMs.push(plusDM);
+      minusDMs.push(minusDM);
     }
 
-    // Calculate ATR for normalization
-    const atrValues = TechnicalIndicators.atr(recentCandles, period);
-    const avgATR = Helpers.average(atrValues);
+    // 2. Initial Smoothing (First value is simple sum)
+    let smoothTR = 0;
+    let smoothPlusDM = 0;
+    let smoothMinusDM = 0;
 
-    if (avgATR === 0) return 0;
+    for (let i = 0; i < period; i++) {
+      smoothTR += trs[i];
+      smoothPlusDM += plusDMs[i];
+      smoothMinusDM += minusDMs[i];
+    }
 
-    // Normalized directional indicators
-    const plusDI = (plusDM / recentCandles.length) / avgATR * 100;
-    const minusDI = (minusDM / recentCandles.length) / avgATR * 100;
+    // Calculate first DX to start the ADX smoothing chain
+    // (Optimization: We need a series of DX values to smooth them into ADX)
+    
+    // We need to calculate rolling values starting from index `period`
+    // Wilder's Smoothing: Previous * (n-1)/n + Current
+    // Or equivalently: Previous - (Previous/n) + Current
+    
+    const dxList: number[] = [];
 
-    // DX (Directional Movement Index)
-    const dx = Math.abs(plusDI - minusDI) / (plusDI + minusDI) * 100;
+    // Helper to calculate DX from smoothed components
+    const calcDX = (pDM: number, mDM: number, tr: number): number => {
+      if (tr === 0) return 0;
+      const pDI = (pDM / tr) * 100;
+      const mDI = (mDM / tr) * 100;
+      const sum = pDI + mDI;
+      return sum === 0 ? 0 : (Math.abs(pDI - mDI) / sum) * 100;
+    };
 
-    return isNaN(dx) ? 0 : dx;
+    // Push first DX
+    dxList.push(calcDX(smoothPlusDM, smoothMinusDM, smoothTR));
+
+    // 3. Calculate rolling Smoothed TR, +/-DM and subsequent DXs
+    // Loop through the rest of the data
+    for (let i = period; i < trs.length; i++) {
+      const currentTR = trs[i];
+      const currentPlusDM = plusDMs[i];
+      const currentMinusDM = minusDMs[i];
+
+      // Wilder's Smoothing formula
+      smoothTR = smoothTR - (smoothTR / period) + currentTR;
+      smoothPlusDM = smoothPlusDM - (smoothPlusDM / period) + currentPlusDM;
+      smoothMinusDM = smoothMinusDM - (smoothMinusDM / period) + currentMinusDM;
+
+      dxList.push(calcDX(smoothPlusDM, smoothMinusDM, smoothTR));
+    }
+
+    // 4. Calculate ADX (Smoothing the DX values)
+    if (dxList.length < period) return dxList[dxList.length - 1]; // Not enough data for full ADX
+
+    // First ADX is average of first 'period' DX values
+    let adx = dxList.slice(0, period).reduce((sum, val) => sum + val, 0) / period;
+
+    // Smoothing for the rest
+    for (let i = period; i < dxList.length; i++) {
+      adx = ((adx * (period - 1)) + dxList[i]) / period;
+    }
+
+    return adx;
   }
 
   /**
@@ -144,8 +211,7 @@ export class RegimeDetector {
    * Get regime strength score (0-1)
    */
   public getRegimeStrength(candles: Candle[], regime: MarketRegime): number {
-    // Используем константу ADX_PERIOD
-    const adx = this.calculateSimpleADX(candles, ADX_PERIOD);
+    const adx = this.calculateStandardADX(candles, ADX_PERIOD);
 
     switch (regime) {
       case MarketRegime.TRENDING:
@@ -178,7 +244,7 @@ export class RegimeDetector {
     };
 
     const strength = this.getRegimeStrength(candles, regime);
-    const adx = this.calculateSimpleADX(candles, ADX_PERIOD);
+    const adx = this.calculateStandardADX(candles, ADX_PERIOD);
 
     return `${regimeEmoji[regime]} ${regime} | ADX: ${adx.toFixed(1)} | Strength: ${(strength * 100).toFixed(0)}%`;
   }
