@@ -59,7 +59,7 @@ export class ConfigManager {
       takeProfitRatio: parseFloat(process.env.TAKE_PROFIT_RATIO || '2.5'),
       trailingStop: false,
       minVolume: 1000000,
-      maxSpread: 0.001,
+      maxSpread: 0.01,
       btcSyncRequired: process.env.BTC_SYNC_REQUIRED === 'true'
     };
 
@@ -76,7 +76,14 @@ export class ConfigManager {
       apiKey: process.env.BINANCE_API_KEY || '',
       apiSecret: process.env.BINANCE_API_SECRET || '',
       testnet: process.env.BINANCE_USE_TESTNET === 'true',
-      symbols: ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT'],
+      symbols: ['BTCUSDT', 'SOLUSDT', 'SUIUSDT', '1000PEPEUSDT', 'WIFUSDT', 'DOGEUSDT', 'TAOUSDT', 'FETUSDT', 'RENDERUSDT', 'NEARUSDT'],
+      // [
+      //   // 'AVAXUSDT', 'HBARUSDT', 'XLMUSDT', 'STRKUSDT', 'SEIUSDT',
+      //   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
+      //   'DOGEUSDT', 
+      //   '1000PEPEUSDT', // <-- ИСПРАВЛЕНО
+      //   'WIFUSDT', 'SUIUSDT', 'NEARUSDT', 'FETUSDT', 'RENDERUSDT', 'TAOUSDT'
+      // ],
       timeframe: '5m',
       strategy,
       risk
