@@ -67,15 +67,20 @@ export class RiskManager {
       // Calculate quantity in base asset
       const quantity = sizeUSD / signal.entry;
   
-      // Apply confidence adjustment
-      const adjustedSize = sizeUSD * signal.confidence;
-      const adjustedQuantity = quantity * signal.confidence;
+      // ИСПРАВЛЕНИЕ (Правка 2): Не масштабируем позицию линейно от confidence (0.1-1.0), так как это ломает R:R.
+      // Вместо этого используем confidence как небольшой бонус/штраф к размеру (диапазон 0.8 - 1.0).
+      // Если confidence = 0.5 -> множитель 0.9
+      // Если confidence = 1.0 -> множитель 1.0
+      const confidenceMultiplier = 0.8 + (signal.confidence * 0.2);
+
+      const adjustedSize = sizeUSD * confidenceMultiplier;
+      const adjustedQuantity = quantity * confidenceMultiplier;
   
       return {
         size: adjustedSize, // Номинальный объем позиции в USD
         quantity: adjustedQuantity, // Количество базового актива
-        risk: riskAmount,
-        riskPercent: riskParams.riskPerTrade * 100,
+        risk: riskAmount * confidenceMultiplier,
+        riskPercent: riskParams.riskPerTrade * 100 * confidenceMultiplier,
         leverage: riskParams.leverage
       };
   }
@@ -237,7 +242,7 @@ export class RiskManager {
    */
   public validateSignal(signal: TradingSignal): { valid: boolean; reason?: string } {
     const riskParams = config.getRiskConfig(); 
-    const posSizeCalculation = this.calculatePositionSize(signal, []); // Это возвращает номинальный объем позиции (size)
+    const posSizeCalculation = this.calculatePositionSize(signal, []); // Это возвращает номинальный объем позиции (size) с учетом confidence множителя
 
     const notionalSize = posSizeCalculation.size; // Номинальный объем для новой позиции
 
@@ -246,6 +251,7 @@ export class RiskManager {
         return { valid: false, reason: `Position notional size too small (${notionalSize.toFixed(2)} USD). Minimum 10 USD.` };
     }
 
+    // ИСПРАВЛЕНИЕ (Правка 1): Проверка маржи
     // 2. Расчет маржи, необходимой для этой новой сделки
     const marginRequiredForNewTrade = notionalSize / riskParams.leverage;
 
@@ -263,7 +269,6 @@ export class RiskManager {
 
     // 5. Проверка общего лимита маржинальных обязательств:
     // Не позволяем суммарной марже превышать заданный процент от текущей эквити.
-    // Это более надежная проверка, чем просто `balance * leverage`.
     const maxTotalMarginAllowed = currentEquity * MAX_TOTAL_MARGIN_COMMITMENT_RATIO;
     
     if (totalMarginCurrentlyUsed + marginRequiredForNewTrade > maxTotalMarginAllowed) {
@@ -285,7 +290,7 @@ export class RiskManager {
       return { valid: false, reason: `R:R too low (${rr.toFixed(2)} < ${minRR})` };
     }
 
-    // 7. Проверка порога уверенности сигнала
+    // 7. Проверка порога уверенности сигнала (фильтр)
     if (signal.confidence < 0.3) {
       return { valid: false, reason: 'Signal confidence too low' };
     }
