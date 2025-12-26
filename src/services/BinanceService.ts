@@ -14,6 +14,7 @@ import {
 } from '../types';
 import { config } from '../config/ConfigManager';
 import { logger } from './Logger';
+import WebSocket from 'ws';
 
 export class BinanceService {
   private apiKey: string;
@@ -54,6 +55,69 @@ export class BinanceService {
       .createHmac('sha256', this.apiSecret)
       .update(queryString)
       .digest('hex');
+  }
+
+  /**
+   * Подписка на стрим свечей
+   * callback будет вызываться при каждом обновлении свечи
+   */
+  public subscribeToCandles(symbols: string[], timeframe: string, callback: (data: any) => void): WebSocket {
+    // Формируем список стримов
+    const streamNames = symbols.map(s => `${s.toLowerCase()}@kline_${timeframe}`).join('/');
+    
+    // 1. ОПРЕДЕЛЯЕМ ПРАВИЛЬНЫЙ БАЗОВЫЙ URL
+    // Для Testnet и Production адреса отличаются кардинально, replace тут ненадежен.
+    const isTestnet = this.baseURL.includes('testnet');
+    
+    let wsBaseUrl = '';
+    if (isTestnet) {
+        // Официальный адрес WS для Futures Testnet
+        wsBaseUrl = 'wss://stream.binancefuture.com';
+    } else {
+        // Официальный адрес WS для Futures Production
+        wsBaseUrl = 'wss://fstream.binance.com';
+    }
+
+    // 2. Собираем полный URL
+    const wsUrl = `${wsBaseUrl}/stream?streams=${streamNames}`;
+
+    logger.info('BinanceService', `Connecting to WebSocket: ${wsUrl}`); // Логируем полный URL для проверки
+    
+    const ws = new WebSocket(wsUrl);
+
+    ws.on('open', () => {
+      logger.info('BinanceService', 'WebSocket connected ✅');
+    });
+
+    ws.on('message', (data: WebSocket.Data) => {
+      try {
+        const parsed = JSON.parse(data.toString());
+        // Формат: { stream: "...", data: { ... } }
+        // Иногда на connection приходит просто ping, его игнорируем, если нет data
+        if (parsed.data && parsed.data.e === 'kline') {
+          callback(parsed.data);
+        }
+      } catch (e) {
+        // Игнорируем ошибки парсинга (например, служебные сообщения)
+      }
+    });
+
+    ws.on('error', (err) => {
+      logger.error('BinanceService', 'WebSocket error', err.message);
+    });
+
+    ws.on('close', (code, reason) => {
+      logger.warn('BinanceService', `WebSocket disconnected (Code: ${code}). Reconnecting...`);
+      // Реконнект через 5 секунд
+      setTimeout(() => this.subscribeToCandles(symbols, timeframe, callback), 5000);
+    });
+
+    // Пинг-понг для поддержания соединения (опционально, но полезно)
+    ws.on('ping', () => {
+        ws.pong();
+    });
+
+    return ws;
   }
 
   /**
