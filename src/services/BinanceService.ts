@@ -80,7 +80,7 @@ export class BinanceService {
       logger.info('BinanceService', `Loaded exchange info for ${count} symbols`);
     } catch (error: any) {
       logger.error('BinanceService', 'Failed to load exchange info', error.message);
-      throw error; // Critical failure, bot cannot trade accurately
+      throw error; // Critical failure
     }
   }
 
@@ -94,6 +94,34 @@ export class BinanceService {
         return 0.001; 
     }
     return step;
+  }
+
+  /**
+   * Get specific position risk (size, margin, etc.)
+   * Used to verify if position is still open on exchange
+   */
+  public async getPositionRisk(symbol: string): Promise<{ positionAmt: number; entryPrice: number; unrealizedProfit: number } | null> {
+    try {
+      const timestamp = Date.now();
+      const queryString = `symbol=${symbol}&timestamp=${timestamp}`;
+      const signature = this.generateSignature(queryString);
+
+      const response = await this.client.get('/fapi/v2/positionRisk', {
+        params: { symbol, timestamp, signature }
+      });
+
+      // API returns an array for the specific symbol
+      const data = response.data[0] || response.data;
+      
+      return {
+        positionAmt: parseFloat(data.positionAmt),
+        entryPrice: parseFloat(data.entryPrice),
+        unrealizedProfit: parseFloat(data.unrealizedProfit)
+      };
+    } catch (error: any) {
+      logger.error('BinanceService', `Failed to get position risk for ${symbol}`, error.message);
+      return null;
+    }
   }
 
   /**
