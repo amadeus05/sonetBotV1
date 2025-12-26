@@ -20,6 +20,29 @@ export class Helpers {
   }
 
   /**
+   * Correctly round quantity DOWN to step size (CRITICAL for LOT_SIZE filter)
+   * Example: quantity=150.567, step=1.0 -> 150
+   * Example: quantity=0.1239, step=0.001 -> 0.123
+   */
+  public static floorToStep(value: number, stepSize: number): number {
+    // Avoid division by zero
+    if (stepSize === 0) return value;
+
+    // 1. Calculate inverse factor (e.g. 1000 for 0.001)
+    const precision = 1 / stepSize;
+    
+    // 2. Floor the value to precision
+    // Using Math.floor to never exceed balance/margin limits
+    const floored = Math.floor(value * precision) / precision;
+
+    // 3. Clean up floating point artifacts (e.g. 0.300000000004)
+    // Determine decimals count from stepSize
+    const decimals = (stepSize.toString().split('.')[1] || '').length;
+    
+    return parseFloat(floored.toFixed(decimals));
+  }
+
+  /**
    * Calculate percentage
    */
   public static percentage(part: number, whole: number): number {
@@ -61,8 +84,6 @@ export class Helpers {
    */
   public static formatCurrency(amount: number, decimals: number = 2): string {
     const sign = amount >= 0 ? '+' : '-'; 
-    
-    // Math.abs убирает знак самого числа, поэтому мы добавляем его вручную через переменную sign
     return `${sign}$${this.formatNumber(Math.abs(amount), decimals)}`;
   }
 

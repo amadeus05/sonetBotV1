@@ -42,13 +42,17 @@ export class TradingBot {
 
     logger.info('TradingBot', '🚀 Starting trading bot...');
 
-    // Test connection
+    // 1. Test connection
     const connected = await this.binance.testConnection();
     if (!connected) {
       throw new Error('Failed to connect to Binance');
     }
 
-    // Sync balance
+    // 2. Load Exchange Info (CRITICAL: Load LOT_SIZE filters)
+    logger.info('TradingBot', '📥 Loading exchange rules...');
+    await this.binance.loadExchangeInfo();
+
+    // 3. Sync balance
     await this.syncBalance();
 
     // Start main loop

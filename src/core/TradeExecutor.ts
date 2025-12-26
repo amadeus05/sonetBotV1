@@ -42,7 +42,7 @@ import {
         const isLong = type === SignalType.LONG;
         const side: 'BUY' | 'SELL' = isLong ? 'BUY' : 'SELL';
   
-        // Calculate quantity
+        // Calculate quantity using Correct Step Size
         const quantity = this.roundQuantity(positionSize / entry, symbol);
   
         logger.info('TradeExecutor', `Executing ${type} signal for ${symbol}`, {
@@ -248,10 +248,11 @@ import {
   
     /**
      * Round quantity to symbol's precision
+     * FIX: Uses dynamic step size from BinanceService
      */
     private roundQuantity(quantity: number, symbol: string): number {
-      // Most futures have 3 decimal places, but adjust as needed
-      return Helpers.roundTo(quantity, 3);
+      const stepSize = this.binance.getStepSize(symbol);
+      return Helpers.floorToStep(quantity, stepSize);
     }
   
     /**

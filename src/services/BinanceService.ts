@@ -10,18 +10,19 @@ import {
   Candle, 
   MarketData, 
   ExchangeOrder, 
-  ExchangeBalance,
-  OrderFlowData 
+  ExchangeBalance
 } from '../types';
 import { config } from '../config/ConfigManager';
 import { logger } from './Logger';
-import { Helpers } from '../utils/Helpers';
 
 export class BinanceService {
   private apiKey: string;
   private apiSecret: string;
   private baseURL: string;
   private client: AxiosInstance;
+
+  // Cache for Step Sizes (e.g. BTCUSDT -> 0.001, 1000PEPEUSDT -> 1)
+  private stepSizeCache: Record<string, number> = {};
 
   constructor() {
     const botConfig = config.getConfig();
@@ -53,6 +54,46 @@ export class BinanceService {
       .createHmac('sha256', this.apiSecret)
       .update(queryString)
       .digest('hex');
+  }
+
+  /**
+   * Load exchange info to cache symbol precisions (Lot Size)
+   * MUST be called at bot startup
+   */
+  public async loadExchangeInfo(): Promise<void> {
+    try {
+      const response = await this.client.get('/fapi/v1/exchangeInfo');
+      
+      const symbols = response.data.symbols;
+      let count = 0;
+      
+      for (const symbolData of symbols) {
+        // Find LOT_SIZE filter to get stepSize
+        const lotSizeFilter = symbolData.filters.find((f: any) => f.filterType === 'LOT_SIZE');
+        
+        if (lotSizeFilter) {
+          this.stepSizeCache[symbolData.symbol] = parseFloat(lotSizeFilter.stepSize);
+          count++;
+        }
+      }
+
+      logger.info('BinanceService', `Loaded exchange info for ${count} symbols`);
+    } catch (error: any) {
+      logger.error('BinanceService', 'Failed to load exchange info', error.message);
+      throw error; // Critical failure, bot cannot trade accurately
+    }
+  }
+
+  /**
+   * Get Step Size for a symbol (sync access from cache)
+   */
+  public getStepSize(symbol: string): number {
+    const step = this.stepSizeCache[symbol];
+    if (step === undefined) {
+        logger.warn('BinanceService', `Step size not found for ${symbol}, using default 0.001`);
+        return 0.001; 
+    }
+    return step;
   }
 
   /**
