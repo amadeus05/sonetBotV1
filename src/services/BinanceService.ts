@@ -14,6 +14,7 @@ import {
 } from '../types';
 import { config } from '../config/ConfigManager';
 import { logger } from './Logger';
+import { Helpers } from '../utils/Helpers';
 import WebSocket from 'ws';
 
 export class BinanceService {
@@ -24,6 +25,11 @@ export class BinanceService {
 
   // Cache for Step Sizes (e.g. BTCUSDT -> 0.001, 1000PEPEUSDT -> 1)
   private stepSizeCache: Record<string, number> = {};
+
+  // WebSocket Management
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 10;
+  private reconnectDelay = 1000;
 
   constructor() {
     const botConfig = config.getConfig();
@@ -43,6 +49,20 @@ export class BinanceService {
         'X-MBX-APIKEY': this.apiKey
       }
     });
+
+    // Handle Rate Limits (429)
+    this.client.interceptors.response.use(
+      response => response,
+      async error => {
+        if (error.response?.status === 429) {
+          const retryAfter = parseInt(error.response.headers['retry-after'] || '60', 10);
+          logger.warn('BinanceService', `⚠️ API Rate limit hit (429). Sleeping for ${retryAfter}s...`);
+          await Helpers.sleep(retryAfter * 1000 + 1000);
+          return this.client.request(error.config);
+        }
+        return Promise.reject(error);
+      }
+    );
 
     logger.info('BinanceService', `Initialized (${botConfig.testnet ? 'TESTNET' : 'PRODUCTION'})`);
   }
@@ -72,7 +92,7 @@ export class BinanceService {
     let wsBaseUrl = '';
     if (isTestnet) {
         // Официальный адрес WS для Futures Testnet
-        wsBaseUrl = 'wss://stream.binancefuture.com';
+        wsBaseUrl = 'wss://stream.testnet.binancefuture.com';
     } else {
         // Официальный адрес WS для Futures Production
         wsBaseUrl = 'wss://fstream.binance.com';
@@ -86,6 +106,7 @@ export class BinanceService {
     const ws = new WebSocket(wsUrl);
 
     ws.on('open', () => {
+      this.reconnectAttempts = 0;
       logger.info('BinanceService', 'WebSocket connected ✅');
     });
 
@@ -107,9 +128,16 @@ export class BinanceService {
     });
 
     ws.on('close', (code, reason) => {
-      logger.warn('BinanceService', `WebSocket disconnected (Code: ${code}). Reconnecting...`);
-      // Реконнект через 5 секунд
-      setTimeout(() => this.subscribeToCandles(symbols, timeframe, callback), 5000);
+      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+        logger.error('BinanceService', 'Max reconnect attempts reached. Stopping bot.');
+        process.exit(1);
+      }
+
+      const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts), 60000);
+      this.reconnectAttempts++;
+
+      logger.warn('BinanceService', `WebSocket disconnected (Code: ${code}). Reconnecting in ${delay}ms... (Attempt ${this.reconnectAttempts})`);
+      setTimeout(() => this.subscribeToCandles(symbols, timeframe, callback), delay);
     });
 
     // Пинг-понг для поддержания соединения (опционально, но полезно)
@@ -177,9 +205,22 @@ export class BinanceService {
       // API returns an array for the specific symbol
       const data = response.data[0] || response.data;
       
+      if (!data || typeof data.positionAmt === 'undefined') {
+        logger.warn('BinanceService', `Invalid position data for ${symbol}`);
+        return null;
+      }
+
+      const positionAmt = parseFloat(data.positionAmt);
+      const entryPrice = parseFloat(data.entryPrice);
+
+      if (isNaN(positionAmt) || isNaN(entryPrice)) {
+        logger.error('BinanceService', `Corrupted position data for ${symbol}`, data);
+        return null;
+      }
+      
       return {
-        positionAmt: parseFloat(data.positionAmt),
-        entryPrice: parseFloat(data.entryPrice),
+        positionAmt: positionAmt,
+        entryPrice: entryPrice,
         unrealizedProfit: parseFloat(data.unrealizedProfit)
       };
     } catch (error: any) {
@@ -310,6 +351,39 @@ export class BinanceService {
     } catch (error: any) {
       logger.error('BinanceService', 'Failed to fetch account info', error.message);
       throw error;
+    }
+  }
+
+  public async getUserTrades(symbol: string, limit: number = 5): Promise<any[]> {
+    try {
+      const timestamp = Date.now();
+      const queryString = `symbol=${symbol}&limit=${limit}&timestamp=${timestamp}`;
+      const signature = this.generateSignature(queryString);
+
+      const response = await this.client.get('/fapi/v1/userTrades', {
+        params: { symbol, limit, timestamp, signature }
+      });
+
+      if (!Array.isArray(response.data)) {
+        logger.warn('BinanceService', `Invalid user trades response for ${symbol}`);
+        return [];
+      }
+
+      return response.data
+        .map((t: any) => ({
+          id: t.id,
+          orderId: t.orderId,
+          price: parseFloat(t.price),
+          qty: parseFloat(t.qty),
+          realizedPnl: parseFloat(t.realizedPnl),
+          side: t.side,
+          time: t.time
+        }))
+        .filter(t => !isNaN(t.price) && !isNaN(t.qty));
+
+    } catch (error: any) {
+      logger.error('BinanceService', `Failed to fetch user trades for ${symbol}`, error.message);
+      return [];
     }
   }
 

@@ -147,8 +147,19 @@ import {
         const isLong = position.side === PositionSide.LONG;
         const side: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
         
-        // 1. FIRST Cancel existing SL/TP orders to prevent double execution
-        await this.cancelAllOrders(position.symbol);
+        // 1. FIRST Check for existing SL/TP to determine if we should cancel first
+        const openOrders = await this.binance.getOpenOrders(position.symbol);
+        
+        // Правка: Приводим тип к string, чтобы избежать ошибки TypeScript о непересекающихся типах
+        const hasSLTP = openOrders.some(o => {
+            const t = o.type as string;
+            return t === 'STOP_MARKET' || t === 'TAKE_PROFIT_MARKET' || t.includes('STOP') || t.includes('PROFIT');
+        });
+
+        if (hasSLTP) {
+            await this.cancelAllOrders(position.symbol);
+            await Helpers.sleep(200);
+        }
 
         // 2. Check quantity via position risk (avoid LOT_SIZE errors on closing remnants)
         const posRisk = await this.binance.getPositionRisk(position.symbol);
@@ -156,8 +167,15 @@ import {
         // If position amt is 0, it was already closed (likely by SL/TP or liquidation)
         if (!posRisk || Math.abs(posRisk.positionAmt) === 0) {
             logger.warn('TradeExecutor', `Position ${position.symbol} already closed on exchange`);
+            
+            // Get accurate exit price from history
+            const trades = await this.binance.getUserTrades(position.symbol, 3);
+            const lastTrade = trades.sort((a, b) => b.time - a.time)[0];
+            const exitPrice = lastTrade ? lastTrade.price : await this.binance.getCurrentPrice(position.symbol);
+            const pnl = lastTrade ? lastTrade.realizedPnl : 0;
+
             // Just update DB state without sending a new order
-            this.finalizePositionInDb(position, position.entry, TradeExitReason.MANUAL); 
+            this.finalizePositionInDb(position, exitPrice, TradeExitReason.MANUAL, pnl); 
             return;
         }
 
@@ -180,38 +198,48 @@ import {
     /**
      * Helper to update DB and stats when position closes
      */
-    private async finalizePositionInDb(position: Position, exitPrice: number, reason: TradeExitReason): Promise<void> {
+    private async finalizePositionInDb(
+        position: Position, 
+        exitPrice: number, 
+        reason: TradeExitReason,
+        realPnlFromExchange?: number
+    ): Promise<void> {
         const isLong = position.side === PositionSide.LONG;
         
-        const pnl = Helpers.calculatePnL(
-            position.entry,
-            exitPrice,
-            position.size,
-            isLong,
-            position.leverage
-        );
+        let pnlValue = 0;
+        let pnlPercent = 0;
+
+        if (realPnlFromExchange !== undefined && realPnlFromExchange !== 0) {
+            pnlValue = realPnlFromExchange;
+            const margin = position.size / position.leverage;
+            pnlPercent = (pnlValue / margin) * 100;
+        } else {
+            const calc = Helpers.calculatePnL(position.entry, exitPrice, position.size, isLong, position.leverage);
+            pnlValue = calc.pnl;
+            pnlPercent = calc.pnlPercent;
+        }
 
         position.closeTime = Date.now();
         position.closePrice = exitPrice;
-        position.pnl = pnl.pnl;
-        position.pnlPercent = pnl.pnlPercent;
+        position.pnl = pnlValue;
+        position.pnlPercent = pnlPercent;
         position.status = PositionStatus.CLOSED;
         position.exitReason = reason;
 
         db.updatePosition(position);
         db.saveTrade({
             position,
-            won: pnl.pnl > 0,
+            won: pnlValue > 0,
             rr: Helpers.calculateRR(position.entry, position.stopLoss, exitPrice, isLong),
             holdTime: position.closeTime - position.openTime,
             slippage: 0
         });
 
-        this.riskManager.updateBalance(pnl.pnl);
+        this.riskManager.updateBalance(pnlValue);
 
         logger.trade(position.symbol, `Position finalized: ${reason}`, {
-            pnl: Helpers.formatCurrency(pnl.pnl),
-            pnlPercent: Helpers.formatPercent(pnl.pnlPercent)
+            pnl: Helpers.formatCurrency(pnlValue),
+            pnlPercent: Helpers.formatPercent(pnlPercent)
         });
     }
   
@@ -234,23 +262,33 @@ import {
           if (Math.abs(posRisk.positionAmt) === 0) {
             logger.info('TradeExecutor', `Position ${position.symbol} closed by Exchange (SL/TP)`);
             
-            // Determine if it was SL or TP based on current price
-            // (Approximation, since we don't have the exact execution price here without querying order history)
-            const currentPrice = await this.binance.getCurrentPrice(position.symbol);
+            // Determine if it was SL or TP based on trade history
+            const trades = await this.binance.getUserTrades(position.symbol, 5);
+            const lastTrade = trades.sort((a, b) => b.time - a.time)[0];
+            let exitPrice = 0;
+            let realizedPnl = 0;
+
+            if (lastTrade && lastTrade.time > position.openTime) {
+                exitPrice = lastTrade.price;
+                realizedPnl = lastTrade.realizedPnl;
+            } else {
+                exitPrice = await this.binance.getCurrentPrice(position.symbol);
+            }
+            
             const isLong = position.side === PositionSide.LONG;
             
             // Simple logic to guess reason
             let reason = TradeExitReason.MANUAL;
             if (isLong) {
-                if (currentPrice <= position.stopLoss * 1.01) reason = TradeExitReason.STOP_LOSS;
-                else if (currentPrice >= position.takeProfit * 0.99) reason = TradeExitReason.TAKE_PROFIT;
+                if (exitPrice <= position.stopLoss * 1.01) reason = TradeExitReason.STOP_LOSS;
+                else if (exitPrice >= position.takeProfit * 0.99) reason = TradeExitReason.TAKE_PROFIT;
             } else {
-                if (currentPrice >= position.stopLoss * 0.99) reason = TradeExitReason.STOP_LOSS;
-                else if (currentPrice <= position.takeProfit * 1.01) reason = TradeExitReason.TAKE_PROFIT;
+                if (exitPrice >= position.stopLoss * 0.99) reason = TradeExitReason.STOP_LOSS;
+                else if (exitPrice <= position.takeProfit * 1.01) reason = TradeExitReason.TAKE_PROFIT;
             }
 
             // Sync DB
-            await this.finalizePositionInDb(position, currentPrice, reason);
+            await this.finalizePositionInDb(position, exitPrice, reason, realizedPnl);
             
             // Clean up any lingering orders (just in case)
             await this.cancelAllOrders(position.symbol);
