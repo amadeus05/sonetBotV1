@@ -1,0 +1,45 @@
+{
+  "name": "fastversion",
+  "version": "1.0.0",
+  "description": "Professional Algo Trading Bot - Trend-Following Momentum Strategy",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "backtest": "ts-node src/backtest.ts",
+    "clean": "rm -rf dist",
+    "type-check": "tsc --noEmit"
+  },
+  "keywords": [
+    "trading",
+    "algorithmic-trading",
+    "binance",
+    "crypto",
+    "trading-bot",
+    "backtesting"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@types/ws": "^8.18.1",
+    "axios": "^1.6.2",
+    "better-sqlite3": "^9.2.2",
+    "dotenv": "^16.3.1",
+    "lodash": "^4.17.21",
+    "ws": "^8.18.3",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/lodash": "^4.14.202",
+    "@types/node": "^20.10.5",
+    "nodemon": "^3.0.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
