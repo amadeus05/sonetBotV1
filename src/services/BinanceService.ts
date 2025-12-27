@@ -92,7 +92,8 @@ export class BinanceService {
     let wsBaseUrl = '';
     if (isTestnet) {
         // Официальный адрес WS для Futures Testnet
-        wsBaseUrl = 'wss://stream.testnet.binancefuture.com';
+        // wsBaseUrl = 'wss://fstream.binancefuture.com';
+        wsBaseUrl = 'wss://fstream.binance.com';
     } else {
         // Официальный адрес WS для Futures Production
         wsBaseUrl = 'wss://fstream.binance.com';
