@@ -333,7 +333,7 @@ import {
       }
   
       // Check for trend reversal
-      const trend = this.trendAnalyzer.analyze(candles);
+      const trend = this.trendAnalyzer.analyze(candles, regime);
       const positionDirection = position.side === 'LONG' ? 
                                 TrendDirection.BULLISH : TrendDirection.BEARISH;
   
