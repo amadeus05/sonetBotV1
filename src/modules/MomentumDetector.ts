@@ -92,7 +92,11 @@ export class MomentumDetector {
     config: any
   ): boolean {
     // RSI extreme condition
-    const rsiExtreme = rsi > config.rsiOverbought || rsi < config.rsiOversold;
+    let rsiExtreme = rsi > config.rsiOverbought || rsi < config.rsiOversold;
+
+    // rsiExtreme =
+    //   (rsi > config.rsiOverbought && priceChange > 0) ||
+    //   (rsi < config.rsiOversold && priceChange < 0);
 
     // Volume spike condition
     const volumeSpike = volumeRatio >= config.volumeSpikeMultiplier;
@@ -106,6 +110,31 @@ export class MomentumDetector {
     // СТАЛО: Достаточно хотя бы одного признака импульса
     return rsiExtreme || volumeSpike || significantMove;
   }
+
+// private hasMomentumSpike(
+//   rsi: number,
+//   volumeRatio: number,
+//   priceChange: number,
+//   config: any
+// ): boolean {
+// const rsiExtreme =
+//   (rsi > config.rsiOverbought && priceChange > 0) ||
+//   (rsi < config.rsiOversold && priceChange < 0);
+//   const strongMove =
+//     Math.abs(priceChange) >= 0.8; // для 5m
+
+//   const volumeSpike =
+//     volumeRatio >= Math.max(config.volumeSpikeMultiplier, 1.5);
+
+//   let score = 0;
+//   if (rsiExtreme) score++;
+//   if (strongMove) score++;
+//   if (volumeSpike) score++;
+
+//   // минимум 2 из 3
+//   return score >= 2;
+// }
+
 
   /**
    * Determine momentum direction
