@@ -123,6 +123,7 @@ import {
           momentum,
           pullback,
           orderFlow: orderFlowConfirmation,
+          rawOrderFlow: marketData.orderFlow,
           regime
         }
       );
@@ -200,6 +201,23 @@ import {
   
       // Generate tags
       const tags = this.generateTags(analysis);
+
+      const debugInfo = {
+          RSI: analysis.momentum?.rsi?.toFixed(2) || 'N/A',
+          // Берем данные из rawOrderFlow, который мы прокинули в analyze
+          CVD_Change: analysis.rawOrderFlow ? analysis.rawOrderFlow.cvdChange.toFixed(4) : 'N/A',
+          OI_Change: analysis.rawOrderFlow ? analysis.rawOrderFlow.oiChange.toFixed(2) + '%' : 'N/A',
+          OI_Accel: analysis.rawOrderFlow ? analysis.rawOrderFlow.oiAccel.toFixed(3) + '%' : 'N/A',
+          Score: analysis.orderFlow ? analysis.orderFlow.score.toFixed(2) : 'N/A'
+      };
+
+      logger.signal(symbol, '🎯 SIGNAL DETAILED', {
+        type: signalType,
+        entry: entry,
+        confidence: confidence.toFixed(2),
+        reasons: tags,
+        metrics: debugInfo
+      });
   
       return {
         symbol,
