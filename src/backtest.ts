@@ -12,20 +12,23 @@ async function runBacktest() {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
-║              🧪 BACKTEST MODE                            ║
+║              🧪 BACKTEST MODE (29 DAYS)                  ║
 ║                                                           ║
-║       Testing Strategy on Historical Data                ║
+║       Testing Strategy with Order Flow Data              ║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
 
-  // Configure backtest
+  // Config for 29 days
+  const now = Date.now();
+  const ONE_DAY = 24 * 60 * 60 * 1000;
+  
   const backtestConfig: BacktestConfig = {
-    // Test last 30 days
-    startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-    endDate: new Date(),
+    // 29 Days lookback from now (minus buffer for partial day)
+    startDate: new Date(now - (29 * ONE_DAY)),
+    endDate: new Date(now - (1 * 60 * 60 * 1000)), // Until 1 hour ago
     
-    // Symbols to test
+    // Symbols to test (from config)
     symbols: config.getConfig().symbols,
     
     // Starting balance
@@ -39,7 +42,7 @@ async function runBacktest() {
   };
 
   console.log('\n📋 Backtest Configuration:');
-  console.log(`   Period: ${backtestConfig.startDate.toISOString().split('T')[0]} to ${backtestConfig.endDate.toISOString().split('T')[0]}`);
+  console.log(`   Period: ${backtestConfig.startDate.toISOString().split('T')[0]} to ${backtestConfig.endDate.toISOString().split('T')[0]} (~29 Days)`);
   console.log(`   Symbols: ${backtestConfig.symbols.join(', ')}`);
   console.log(`   Initial Balance: $${backtestConfig.initialBalance}`);
   console.log(`   Risk per Trade: ${backtestConfig.risk.riskPerTrade * 100}%`);
@@ -50,10 +53,7 @@ async function runBacktest() {
   
   try {
     const result = await engine.run(backtestConfig);
-    
-    // Results are displayed by the engine
     process.exit(0);
-    
   } catch (error: any) {
     logger.error('Backtest', 'Backtest failed', error.message);
     process.exit(1);
