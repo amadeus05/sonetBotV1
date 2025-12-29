@@ -14,6 +14,9 @@ export interface Candle {
     low: number;
     close: number;
     volume: number;
+
+    takerBuyBaseVolume: number;
+    openInterest: number; 
   }
   
   export interface OrderFlowData {
