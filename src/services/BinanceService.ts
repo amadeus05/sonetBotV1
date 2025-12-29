@@ -1,7 +1,6 @@
 /**
  * Binance Exchange Service
  * Responsibility: Handle all communication with Binance API
- * Supports both testnet and production
  */
 
 import axios, { AxiosInstance } from 'axios';
@@ -30,10 +29,7 @@ export class BinanceService {
     this.apiKey = botConfig.apiKey;
     this.apiSecret = botConfig.apiSecret;
     
-    // Use testnet or production
-    this.baseURL = botConfig.testnet 
-      ? 'https://testnet.binancefuture.com'
-      : 'https://fapi.binance.com';
+    this.baseURL = 'https://fapi.binance.com';
 
     this.client = axios.create({
       baseURL: this.baseURL,
@@ -43,7 +39,7 @@ export class BinanceService {
       }
     });
 
-    logger.info('BinanceService', `Initialized (${botConfig.testnet ? 'TESTNET' : 'PRODUCTION'})`);
+    logger.info('BinanceService', `Initialized (https://fapi.binance.com)`);
   }
 
   /**
@@ -130,7 +126,7 @@ export class BinanceService {
   public async getCandles(
     symbol: string,
     interval: string = '5m',
-    limit: number = 1000,
+    limit: number = 1000, // Binance max is 1000 for klines
     startTime?: number,
     endTime?: number
   ): Promise<Candle[]> {
@@ -148,11 +144,39 @@ export class BinanceService {
         high: parseFloat(kline[2]),
         low: parseFloat(kline[3]),
         close: parseFloat(kline[4]),
-        volume: parseFloat(kline[5])
+        volume: parseFloat(kline[5]),
+        // Index 9 is Taker Buy Base Asset Volume
+        takerBuyBaseVolume: parseFloat(kline[9]), 
+        openInterest: 0 // Default 0, will be populated separately
       }));
     } catch (error: any) {
       logger.error('BinanceService', `Failed to fetch candles for ${symbol}`, error.message);
       throw error;
+    }
+  }
+
+    /**
+   * NEW: Get Historical Open Interest
+   * Note: Limit max is usually 500 for this endpoint
+   */
+  public async getHistoricalOpenInterest(
+    symbol: string,
+    period: string,
+    limit: number = 500,
+    startTime?: number,
+    endTime?: number
+  ): Promise<{ symbol: string; sumOpenInterest: string; sumOpenInterestValue: string; timestamp: number }[]> {
+    try {
+      const params: any = { symbol, period, limit };
+      if (startTime) params.startTime = startTime;
+      if (endTime) params.endTime = endTime;
+
+      const response = await this.client.get('/futures/data/openInterestHist', { params });
+      return response.data;
+    } catch (error: any) {
+      // OI history is not critical to crash, but strictly needed for OF strategy
+      logger.warn('BinanceService', `Failed to fetch OI history for ${symbol}`, error.message);
+      return [];
     }
   }
 
