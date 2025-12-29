@@ -1,10 +1,6 @@
-// ========================================================================
-//   FILE: src/core/BacktestEngine.ts
-// ========================================================================
-
 /**
  * Backtest Engine (Parallel / Portfolio Mode)
- * V7.2: Fixed OI Pagination Logic
+ * V7.3 FINAL: Fixed OI Fetching & Metrics Calculation
  */
 
 import {
@@ -56,7 +52,7 @@ export class BacktestEngine {
     }
 
     public async run(backtestConfig: BacktestConfig): Promise<BacktestResult> {
-        logger.info('Backtest', '🧪 Starting V7.2 (Fixed OI) backtest...', {
+        logger.info('Backtest', '🧪 Starting V7.3 FINAL backtest...', {
             symbols: backtestConfig.symbols.join(', '),
             initialBalance: backtestConfig.initialBalance
         });
@@ -146,7 +142,10 @@ export class BacktestEngine {
 
                     const pnlStr = Helpers.formatCurrency(result.position.pnl!);
                     const emoji = result.won ? '✅' : '❌';
-                    console.log(`\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} (${result.position.pnlPercent?.toFixed(2)}%) | Reason: ${result.position.exitReason}`);
+                    const durationMins = Math.round((result.holdTime) / 1000 / 60);
+                    const durationStr = durationMins > 60 ? `${(durationMins/60).toFixed(1)}h` : `${durationMins}m`;
+
+                    console.log(`\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} (${result.position.pnlPercent?.toFixed(2)}%) | Time: ${durationStr} | Reason: ${result.position.exitReason}`);
                 }
             }
 
@@ -227,7 +226,6 @@ export class BacktestEngine {
             if (cached.length > 0 && cached.some(c => c.openInterest > 0)) {
                 return cached as Candle[];
             }
-            console.log(`[CACHE] Found data but OI is missing. Re-fetching from API...`);
         }
 
         // 2. Fetch from Binance
@@ -253,15 +251,10 @@ export class BacktestEngine {
             const oiDataMap = new Map<number, number>();
             let oiCursor = chunkStartTime;
 
-            // !!! FIX: Ensure we don't request a range larger than limit allows !!!
             while (oiCursor <= chunkEndTime) {
                 await Helpers.sleep(50);
                 
-                // Рассчитываем целевой конец для OI запроса, чтобы не превысить лимит 500
-                // oiLimit * timeframeMs - это максимальное время, которое вернет запрос
                 const maxRequestDuration = oiLimit * timeframeMs;
-                // Мы хотим получить данные от oiCursor, но не дальше chunkEndTime
-                // И не больше чем 500 свечей вперед
                 const requestEndTime = Math.min(chunkEndTime, oiCursor + maxRequestDuration - 1);
 
                 const oiHistory = await this.binance.getHistoricalOpenInterest(
@@ -269,7 +262,7 @@ export class BacktestEngine {
                     timeframe,
                     oiLimit,
                     oiCursor,
-                    requestEndTime // <-- ИСПРАВЛЕНИЕ: Передаем ограниченный конец
+                    requestEndTime
                 );
 
                 if (oiHistory.length === 0) break;
@@ -285,20 +278,9 @@ export class BacktestEngine {
                 
                 if (lastOiTime >= chunkEndTime) break;
                 
-                // Двигаемся дальше
                 oiCursor = lastOiTime + timeframeMs;
                 
-                // Protection against infinite loop if API returns same timestamp
                 if (oiCursor <= lastOiTime) oiCursor = lastOiTime + timeframeMs;
-            }
-
-            // DEBUG CHECK (First batch only)
-            if (allCandles.length === 0 && candles.length > 0) {
-                 const firstCandleTs = candles[0].timestamp;
-                 const match = oiDataMap.get(firstCandleTs);
-                 if (match === undefined) {
-                    console.log(`[DEBUG] Sync Mismatch on ${symbol}. Candle: ${firstCandleTs}. First OI: ${Array.from(oiDataMap.keys())[0]}`);
-                 }
             }
 
             // C. Merge OI into Candles
@@ -337,8 +319,7 @@ export class BacktestEngine {
     }
 
     private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: StrategyEngine): Promise<TradingSignal | null> {
-        let orderFlow = undefined;
-        orderFlow = this.calculateOrderFlowMetrics(candles);
+        const orderFlow = this.calculateOrderFlowMetrics(candles);
         const marketData = {
             symbol,
             candles: candles,
@@ -350,43 +331,12 @@ export class BacktestEngine {
         return await strategy.analyze(marketData);
     }
 
-    // private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined {
-    //     if (candles.length < 2) return undefined;
-
-    //     const current = candles[candles.length - 1];
-    //     const prev = candles[candles.length - 2];
-
-    //     // Delta
-    //     const delta = (2 * current.takerBuyBaseVolume) - current.volume;
-
-    //     // OI Change %
-    //     let oiChange = 0;
-    //     if (prev.openInterest && prev.openInterest > 0) {
-    //         oiChange = ((current.openInterest - prev.openInterest) / prev.openInterest) * 100;
-    //     }
-
-    //     return {
-    //         timestamp: current.timestamp,
-    //         cvd: 0,
-    //         cvdChange: delta,
-    //         oiChange: oiChange,
-    //         oiAccel: 0,
-    //         liquidationsLong: 0,
-    //         liquidationsShort: 0
-    //     };
-    // }
-
-    // --- STANDARD EXECUTION LOGIC ---
-    
-private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined {
-        if (candles.length < 2) return undefined;
-
+    private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined {
+        if (candles.length < 3) return undefined;
         const current = candles[candles.length - 1];
         const prev = candles[candles.length - 2];
+        const prevPrev = candles[candles.length - 3];
 
-        // 1. Нормализованная Дельта (Normalized CVD)
-        // Формула: (TakerBuy - TakerSell) / TotalVolume
-        // Результат всегда от -1 (все продают) до +1 (все покупают)
         let normalizedDelta = 0;
         if (current.volume > 0) {
             const takerBuy = current.takerBuyBaseVolume;
@@ -394,19 +344,25 @@ private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined 
             normalizedDelta = (takerBuy - takerSell) / current.volume;
         }
 
-        // 2. OI Change % (Без изменений)
-        let oiChange = 0;
-        if (prev.openInterest && prev.openInterest > 0) {
-            oiChange = ((current.openInterest - prev.openInterest) / prev.openInterest) * 100;
+        let currentOIChange = 0;
+        if (prev.openInterest > 0) {
+            currentOIChange = ((current.openInterest - prev.openInterest) / prev.openInterest) * 100;
         }
+
+        let prevOIChange = 0;
+        if (prevPrev.openInterest > 0) {
+            prevOIChange = ((prev.openInterest - prevPrev.openInterest) / prevPrev.openInterest) * 100;
+        }
+
+        const oiAccel = currentOIChange - prevOIChange;
 
         return {
             timestamp: current.timestamp,
-            cvd: 0, 
-            cvdChange: normalizedDelta, // ТЕПЕРЬ ЗДЕСЬ ЗНАЧЕНИЕ ОТ -1 ДО 1
-            oiChange: oiChange,
-            oiAccel: 0,
-            liquidationsLong: 0, // В бэктесте их нет
+            cvd: 0,
+            cvdChange: normalizedDelta,
+            oiChange: currentOIChange,
+            oiAccel: oiAccel,
+            liquidationsLong: 0,
             liquidationsShort: 0
         };
     }
@@ -447,7 +403,7 @@ private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined 
 
         const date = new Date(candle.timestamp);
         const readableTime = date.toISOString().replace('T', ' ').substring(0, 19);
-        console.log(`\n☑️ OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${signal.entry} (Conf: ${signal.confidence.toFixed(2)})`);
+        console.log(`\n✅ OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${signal.entry} (Conf: ${signal.confidence.toFixed(2)})`);
         this.activePositions.push(position);
     }
 
@@ -489,7 +445,6 @@ private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined 
         if (isLiquidation) {
             const marginLocked = position.size / position.leverage;
             netPnLValue = -marginLocked;
-            exitFee = 0;
         } else {
             const pnlResult = Helpers.calculatePnL(position.entry, exitPrice, position.size, isLong, position.leverage);
             const exitNotional = position.size * (exitPrice / position.entry);
@@ -515,7 +470,7 @@ private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined 
             won: absoluteNetPnL > 0,
             rr,
             holdTime: position.closeTime - position.openTime,
-            slippage: isLiquidation ? 0 : Math.abs(position.stopLoss - exitPrice)
+            slippage: 0
         };
     }
 

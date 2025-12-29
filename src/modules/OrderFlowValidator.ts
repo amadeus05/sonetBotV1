@@ -1,7 +1,7 @@
 /**
  * Order Flow Validator
  * Responsibility: Validate signals using order flow data (CVD, OI, Liquidations)
- * UPDATED: V7 Logic (Normalized CVD & Adaptive Scoring)
+ * UPDATED: V7.3 FINAL (Balanced Logic + Accel Bonus)
  */
 
 import { OrderFlowData, OrderFlowConfirmation, TrendDirection } from '../types';
@@ -34,7 +34,10 @@ export class OrderFlowValidator {
     // 2. Check OI Confirmation
     const oiConfirmed = this.checkOIConfirmation(orderFlow, direction);
 
-    // 3. Check Liquidations (Adaptive)
+    // 3. OI Acceleration (Bonus - Weight +0.1)
+    const accelAligned = this.checkOIAcceleration(orderFlow);
+
+    // 4. Check Liquidations (Adaptive)
     // In backtest, liquidation data is usually 0. We shouldn't penalize the score for this.
     const hasLiquidationData = orderFlow.liquidationsLong > 0 || orderFlow.liquidationsShort > 0;
     
@@ -42,12 +45,23 @@ export class OrderFlowValidator {
         ? this.checkLiquidations(orderFlow, direction)
         : true; // Pass by default if data is missing
 
-    // 4. Calculate Score based on available data
-    const score = this.calculateScore(cvdAligned, oiConfirmed, liquidationsSupport, hasLiquidationData);
+    // --- VETO LOGIC (Red Flags) ---
+    let isDivergent = false;
+    
+    // Veto 1: Long, but money leaving (OI dropping)
+    if (direction === TrendDirection.BULLISH && orderFlow.oiChange < -0.05) isDivergent = true;
+    
+    // Veto 2: Short, money leaving AND no CVD support
+    if (direction === TrendDirection.BEARISH && orderFlow.oiChange < -0.05 && !cvdAligned) {
+         isDivergent = true; 
+    }
 
-    // 5. Overall confirmation logic
-    // We require a good score (> 0.5) AND at least one primary factor (CVD or OI)
-    const confirmed = score >= 0.5 && (cvdAligned || oiConfirmed);
+    // 5. Calculate Score based on available data
+    const score = this.calculateScore(cvdAligned, oiConfirmed, liquidationsSupport, hasLiquidationData, accelAligned);
+
+    // 6. Overall confirmation logic
+    // Pass if score >= 0.5 (Either CVD or OI+Accel is enough) AND No Veto
+    const confirmed = score >= 0.5 && (cvdAligned || oiConfirmed) && !isDivergent;
 
     return {
       confirmed,
@@ -68,9 +82,8 @@ export class OrderFlowValidator {
   ): boolean {
     const delta = orderFlow.cvdChange;
     
-    // Threshold: 0.02 means 2% more buy volume than sell volume (or vice versa).
-    // This is sensitive enough for small timeframes.
-    const threshold = 0.02; 
+    // Lower threshold (0.2%) to catch minimal volume dominance
+    const threshold = 0.002; 
 
     // For LONG: We want positive Delta (Buyers > Sellers)
     if (direction === TrendDirection.BULLISH) {
@@ -93,7 +106,8 @@ export class OrderFlowValidator {
     direction: TrendDirection
   ): boolean {
     const oiChange = orderFlow.oiChange; // in Percent
-    const minOIChange = 0.05; // 0.05% change per candle
+    // Lower threshold (0.02%) to catch minimal interest growth
+    const minOIChange = 0.02; 
 
     // Rising OI indicates new money entering the market, confirming the move.
     
@@ -106,10 +120,18 @@ export class OrderFlowValidator {
       // For Shorts: 
       // 1. Rising OI (Aggressive shorting) -> Strongest signal
       // 2. Falling OI (Longs liquidation/puking) -> Can also drive price down
-      return oiChange > minOIChange || oiChange < -minOIChange;
+      return oiChange > minOIChange || oiChange < -0.1;
     }
 
     return false;
+  }
+
+  /**
+   * Check OI Acceleration
+   */
+  private checkOIAcceleration(orderFlow: OrderFlowData): boolean {
+    // Bonus if money entering faster than before
+    return orderFlow.oiAccel > 0.01;
   }
 
   /**
@@ -141,7 +163,8 @@ export class OrderFlowValidator {
     cvdAligned: boolean,
     oiConfirmed: boolean,
     liquidationsSupport: boolean,
-    hasLiquidationData: boolean
+    hasLiquidationData: boolean,
+    accelAligned: boolean = false
   ): number {
     let score = 0;
 
@@ -157,7 +180,12 @@ export class OrderFlowValidator {
         if (oiConfirmed) score += 0.4;
     }
 
-    return score;
+    // Acceleration Bonus (only applies if OI is confirmed)
+    if (accelAligned && oiConfirmed) {
+        score += 0.1;
+    }
+
+    return Math.min(score, 1.0);
   }
 
   /**
@@ -191,8 +219,8 @@ export class OrderFlowValidator {
     const scorePercent = (confirmation.score * 100).toFixed(0);
 
     const details: string[] = [];
-    details.push(confirmation.cvdAligned ? 'CVD+' : 'CVD-');
-    details.push(confirmation.oiConfirmed ? 'OI+' : 'OI-');
+    if (confirmation.cvdAligned) details.push('CVD+');
+    if (confirmation.oiConfirmed) details.push('OI+');
     
     // Only show Liq status if it was actually checked (score < 1.0 implies strict checking or missing data handling)
     if (confirmation.liquidationsSupport) details.push('LIQ+');

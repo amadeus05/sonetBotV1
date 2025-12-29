@@ -1,7 +1,7 @@
 /**
  * Strategy Engine
  * Responsibility: Orchestrate all analysis modules and generate trading signals
- * This is the BRAIN of the bot
+ * UPDATED: V7.3 With RSI Guard & Detailed Metrics
  */
 
 import { 
@@ -107,13 +107,31 @@ import {
       );
   
       if (!orderFlowConfirmation.confirmed) {
+        // Uncomment to debug why signals are skipped
+        console.log(`[FILTER] Skipped ${symbol}: OrderFlow Low Score (${orderFlowConfirmation.score.toFixed(2)}) | CVD:${orderFlowConfirmation.cvdAligned} OI:${orderFlowConfirmation.oiConfirmed}`);
+        
         logger.debug('StrategyEngine', `${symbol}: Order flow not confirmed`, {
           score: orderFlowConfirmation.score
         });
         return null;
       }
   
-      // STEP 6: Generate Signal
+      // STEP 6: Additional Filters (Hard Rules)
+      const rsi = momentum.rsi;
+      
+      // RSI GUARD: RELAXED (75 / 25)
+      // We avoid buying > 75 (Extreme Overbought)
+      if (trend.direction === TrendDirection.BULLISH && rsi > 75) {
+          // console.log(`[FILTER] Skipped LONG on ${symbol}: RSI ${rsi.toFixed(1)} > 75`);
+          return null;
+      }
+      // We avoid selling < 25 (Extreme Oversold)
+      if (trend.direction === TrendDirection.BEARISH && rsi < 25) {
+          // console.log(`[FILTER] Skipped SHORT on ${symbol}: RSI ${rsi.toFixed(1)} < 25`);
+          return null;
+      }
+  
+      // STEP 7: Generate Signal
       const signal = this.generateSignal(
         symbol,
         candles,
@@ -132,10 +150,12 @@ import {
         return null;
       }
   
-      // STEP 7: Validate with Risk Manager
+      // STEP 8: Validate with Risk Manager
       const validation = this.riskManager.validateSignal(signal);
       
       if (!validation.valid) {
+        // logger.warn('StrategyEngine', `${symbol}: Signal rejected by risk manager`, { reason: validation.reason });
+        
         logger.warn('StrategyEngine', `${symbol}: Signal rejected by risk manager`, {
           reason: validation.reason
         });
@@ -179,32 +199,15 @@ import {
       // Take Profit: based on R:R ratio
       const takeProfit = this.riskManager.calculateTakeProfit(entry, stopLoss, isLong);
       
-      // ИСПРАВЛЕНИЕ: Сначала считаем уверенность!
       // Calculate confidence score
       const confidence = this.calculateConfidence(analysis);
   
-      // Calculate position size
-      const tempSignal: TradingSignal = {
-        symbol,
-        type: signalType,
-        entry,
-        stopLoss,
-        takeProfit,
-        positionSize: 0, 
-        confidence: confidence, // <-- ИСПРАВЛЕНИЕ: Передаем рассчитанную уверенность
-        timestamp: Date.now(),
-        tags: [],
-        metadata: analysis
-      };
-  
-      const positionSize = this.riskManager.calculatePositionSize(tempSignal, candles);
-  
       // Generate tags
       const tags = this.generateTags(analysis);
-
+  
+      // --- LOGGING METRICS ---
       const debugInfo = {
           RSI: analysis.momentum?.rsi?.toFixed(2) || 'N/A',
-          // Берем данные из rawOrderFlow, который мы прокинули в analyze
           CVD_Change: analysis.rawOrderFlow ? analysis.rawOrderFlow.cvdChange.toFixed(4) : 'N/A',
           OI_Change: analysis.rawOrderFlow ? analysis.rawOrderFlow.oiChange.toFixed(2) + '%' : 'N/A',
           OI_Accel: analysis.rawOrderFlow ? analysis.rawOrderFlow.oiAccel.toFixed(3) + '%' : 'N/A',
@@ -218,6 +221,23 @@ import {
         reasons: tags,
         metrics: debugInfo
       });
+      // -----------------------
+  
+      // Calculate position size
+      const tempSignal: TradingSignal = {
+        symbol,
+        type: signalType,
+        entry,
+        stopLoss,
+        takeProfit,
+        positionSize: 0, 
+        confidence: confidence,
+        timestamp: Date.now(),
+        tags: [],
+        metadata: analysis
+      };
+  
+      const positionSize = this.riskManager.calculatePositionSize(tempSignal, candles);
   
       return {
         symbol,
@@ -225,7 +245,7 @@ import {
         entry,
         stopLoss,
         takeProfit,
-        positionSize: positionSize.size, // Теперь здесь будет не 0
+        positionSize: positionSize.size,
         confidence,
         timestamp: Date.now(),
         tags,
