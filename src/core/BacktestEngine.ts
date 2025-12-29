@@ -1,6 +1,10 @@
+// ========================================================================
+//   FILE: src/core/BacktestEngine.ts
+// ========================================================================
+
 /**
  * Backtest Engine (Parallel / Portfolio Mode)
- * V6 FINAL: With Detailed Logs & Daily PnL
+ * V7.2: Fixed OI Pagination Logic
  */
 
 import {
@@ -12,7 +16,8 @@ import {
     PositionSide,
     TradeExitReason,
     TradeResult,
-    TradingSignal
+    TradingSignal,
+    OrderFlowData
 } from '../types';
 
 import { StrategyEngine } from './StrategyEngine';
@@ -25,15 +30,15 @@ import { config } from '../config/ConfigManager';
 import * as fs from 'fs';
 import * as path from 'path';
 
-// --- КОНСТАНТЫ ---
+// --- CONSTANTS ---
 const BINANCE_TAKER_FEE = 0.0005; // 0.05%
 const SLIPPAGE_PERCENT = 0.0002;  // 0.02%
-const STRATEGY_LOOKBACK = 1000;   // Окно истории
+const STRATEGY_LOOKBACK = 1000;   // History window
 
 export class BacktestEngine {
     private binance: BinanceService;
 
-    // --- СОСТОЯНИЕ АККАУНТА ---
+    // --- ACCOUNT STATE ---
     private walletBalance: number = 0;
     private freeBalance: number = 0;
     private lockedMargin: number = 0;
@@ -51,12 +56,12 @@ export class BacktestEngine {
     }
 
     public async run(backtestConfig: BacktestConfig): Promise<BacktestResult> {
-        logger.info('Backtest', '🧪 Starting V6 (LOGGING) backtest...', {
+        logger.info('Backtest', '🧪 Starting V7.2 (Fixed OI) backtest...', {
             symbols: backtestConfig.symbols.join(', '),
             initialBalance: backtestConfig.initialBalance
         });
 
-        // 1. Инициализация
+        // 1. Initialize Account
         this.walletBalance = backtestConfig.initialBalance;
         this.freeBalance = backtestConfig.initialBalance;
         this.lockedMargin = 0;
@@ -74,11 +79,11 @@ export class BacktestEngine {
         const riskManager = new RiskManager(backtestConfig.initialBalance);
         const strategyEngine = new StrategyEngine(riskManager);
 
-        // 2. Загрузка данных
+        // 2. Load Data (Klines + Open Interest)
         const marketData = await this.fetchAllMarketData(backtestConfig);
         if (Object.keys(marketData).length === 0) throw new Error("No market data fetched");
 
-        // 3. Таймлайн
+        // 3. Create Timeline
         const allTimestamps = new Set<number>();
         for (const symbol in marketData) {
             marketData[symbol].forEach(c => allTimestamps.add(c.timestamp));
@@ -87,47 +92,40 @@ export class BacktestEngine {
         const cursor: Record<string, number> = {};
         backtestConfig.symbols.forEach(s => cursor[s] = 0);
 
-        logger.info('Backtest', `Steps: ${timeline.length}`);
+        logger.info('Backtest', `Timeline Steps: ${timeline.length}`);
 
-        // Переменные для Day PnL
+        // Daily PnL Tracking
         let currentDayStr = '';
         let startOfDayEquity = this.walletBalance;
 
-        // === ГЛАВНЫЙ ЦИКЛ ===
+        // === MAIN LOOP ===
         for (let i = 0; i < timeline.length; i++) {
             const currentTimestamp = timeline[i];
             const maxOpenTrades = backtestConfig.risk.maxOpenTrades;
 
-            // 📅 ЛОГИКА СМЕНЫ ДНЯ (DAILY PNL)
             const dateDate = new Date(currentTimestamp);
             const dateStr = dateDate.toISOString().split('T')[0];
-
             const currentCandlesSnapshot = this.getSnapshot(marketData, cursor, currentTimestamp);
             const currentEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot);
 
             if (currentDayStr === '') {
                 currentDayStr = dateStr;
             } else if (currentDayStr !== dateStr) {
-                // День закончился
                 const dailyPnL = currentEquity - startOfDayEquity;
                 const dailyPercent = (dailyPnL / startOfDayEquity) * 100;
-
                 console.log(`\n📅 Day Finished: ${currentDayStr} | PnL: ${Helpers.formatCurrency(dailyPnL)} (${dailyPercent > 0 ? '+' : ''}${dailyPercent.toFixed(2)}%) | Eq: ${Helpers.formatCurrency(currentEquity)}`);
-
                 currentDayStr = dateStr;
                 startOfDayEquity = currentEquity;
             }
 
-            // Прогресс бар
             if (i % 2000 === 0) {
                 const percent = ((i / timeline.length) * 100).toFixed(1);
                 process.stdout.write(`\r[${percent}%] Eq: $${currentEquity.toFixed(0)} | Free: $${this.freeBalance.toFixed(0)} | Pos: ${this.activePositions.length}  `);
             }
 
-            // SYNC RISK MANAGER
             (riskManager as any).currentBalance = currentEquity;
 
-            // A. ПРОВЕРКА ВЫХОДОВ
+            // A. Check Exits
             for (let j = this.activePositions.length - 1; j >= 0; j--) {
                 const position = this.activePositions[j];
                 const candle = currentCandlesSnapshot[position.symbol];
@@ -140,25 +138,20 @@ export class BacktestEngine {
                 if (result) {
                     this.activePositions.splice(j, 1);
                     this.closedTrades.push(result);
-
                     const marginReleased = position.size / position.leverage;
                     this.lockedMargin -= marginReleased;
-
                     const cashReturn = marginReleased + result.position.pnl!;
                     this.freeBalance += cashReturn;
                     this.walletBalance = this.freeBalance + this.lockedMargin;
 
-                    // 📝 ЛОГИРОВАНИЕ СДЕЛКИ (ВОТ ОНО!)
                     const pnlStr = Helpers.formatCurrency(result.position.pnl!);
                     const emoji = result.won ? '✅' : '❌';
-                    // Используем console.log для наглядности или logger для записи в файл
                     console.log(`\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} (${result.position.pnlPercent?.toFixed(2)}%) | Reason: ${result.position.exitReason}`);
                 }
             }
 
-            // B. ПОИСК ВХОДОВ
+            // B. Check Entries
             if (this.activePositions.length < maxOpenTrades) {
-
                 for (const symbol of backtestConfig.symbols) {
                     if (this.activePositions.length >= maxOpenTrades) break;
                     if (this.activePositions.some(p => p.symbol === symbol)) continue;
@@ -182,7 +175,6 @@ export class BacktestEngine {
                 }
             }
 
-            // C. ЗАПИСЬ
             const endTickEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot);
             this.equityCurve.push({
                 timestamp: currentTimestamp,
@@ -200,11 +192,224 @@ export class BacktestEngine {
         const result = this.calculateResults(backtestConfig);
         this.saveResults(result);
         this.displaySummary(result);
-
         return result;
     }
 
-    // --- ЛОГИКА ---
+    // --- DATA FETCHING & ORDER FLOW ---
+
+    private async fetchAllMarketData(config: BacktestConfig): Promise<Record<string, Candle[]>> {
+        const data: Record<string, Candle[]> = {};
+        logger.info('Backtest', 'Fetching historical data (Klines + Open Interest)...');
+        
+        for (const symbol of config.symbols) {
+            process.stdout.write(`Fetching ${symbol}... `);
+            const candles = await this.fetchHistoricalData(symbol, config.startDate, config.endDate);
+            if (candles.length > 0) {
+                data[symbol] = candles;
+                const hasOI = candles.some(c => c.openInterest && c.openInterest > 0);
+                console.log(`OK (${candles.length} candles)${hasOI ? ' [OI Data Included]' : ' [No OI Data]'}`);
+            } else {
+                console.log(`FAIL`);
+            }
+        }
+        console.log('');
+        return data;
+    }
+
+    private async fetchHistoricalData(symbol: string, startDate: Date, endDate: Date): Promise<Candle[]> {
+        const timeframe = config.getConfig().timeframe;
+        const startTime = startDate.getTime();
+        const endTime = endDate.getTime();
+
+        // 1. Check DB Cache
+        if (db.hasDataForRange(symbol, timeframe, startTime, endTime)) {
+            const cached = db.getCandles(symbol, timeframe, startTime, endTime);
+            if (cached.length > 0 && cached.some(c => c.openInterest > 0)) {
+                return cached as Candle[];
+            }
+            console.log(`[CACHE] Found data but OI is missing. Re-fetching from API...`);
+        }
+
+        // 2. Fetch from Binance
+        const allCandles: Candle[] = [];
+        let currentTime = startTime;
+        const klineLimit = 1000;
+        const oiLimit = 500;
+        
+        // Calculate timeframe in ms
+        const timeframeMs = timeframe === '15m' ? 15 * 60 * 1000 : 5 * 60 * 1000;
+
+        while (currentTime < endTime) {
+            await Helpers.sleep(50); 
+
+            // A. Get Klines
+            const candles = await this.binance.getCandles(symbol, timeframe, klineLimit, currentTime);
+            if (candles.length === 0) break;
+
+            const chunkStartTime = candles[0].timestamp;
+            const chunkEndTime = candles[candles.length - 1].timestamp;
+
+            // B. Get Open Interest History
+            const oiDataMap = new Map<number, number>();
+            let oiCursor = chunkStartTime;
+
+            // !!! FIX: Ensure we don't request a range larger than limit allows !!!
+            while (oiCursor <= chunkEndTime) {
+                await Helpers.sleep(50);
+                
+                // Рассчитываем целевой конец для OI запроса, чтобы не превысить лимит 500
+                // oiLimit * timeframeMs - это максимальное время, которое вернет запрос
+                const maxRequestDuration = oiLimit * timeframeMs;
+                // Мы хотим получить данные от oiCursor, но не дальше chunkEndTime
+                // И не больше чем 500 свечей вперед
+                const requestEndTime = Math.min(chunkEndTime, oiCursor + maxRequestDuration - 1);
+
+                const oiHistory = await this.binance.getHistoricalOpenInterest(
+                    symbol,
+                    timeframe,
+                    oiLimit,
+                    oiCursor,
+                    requestEndTime // <-- ИСПРАВЛЕНИЕ: Передаем ограниченный конец
+                );
+
+                if (oiHistory.length === 0) break;
+
+                oiHistory.forEach(item => {
+                    const ts = Number(item.timestamp);
+                    const val = parseFloat(item.sumOpenInterest);
+                    oiDataMap.set(ts, val);
+                });
+
+                const lastItem = oiHistory[oiHistory.length - 1];
+                const lastOiTime = Number(lastItem.timestamp);
+                
+                if (lastOiTime >= chunkEndTime) break;
+                
+                // Двигаемся дальше
+                oiCursor = lastOiTime + timeframeMs;
+                
+                // Protection against infinite loop if API returns same timestamp
+                if (oiCursor <= lastOiTime) oiCursor = lastOiTime + timeframeMs;
+            }
+
+            // DEBUG CHECK (First batch only)
+            if (allCandles.length === 0 && candles.length > 0) {
+                 const firstCandleTs = candles[0].timestamp;
+                 const match = oiDataMap.get(firstCandleTs);
+                 if (match === undefined) {
+                    console.log(`[DEBUG] Sync Mismatch on ${symbol}. Candle: ${firstCandleTs}. First OI: ${Array.from(oiDataMap.keys())[0]}`);
+                 }
+            }
+
+            // C. Merge OI into Candles
+            let lastKnownOI = 0;
+            if (allCandles.length > 0) lastKnownOI = allCandles[allCandles.length - 1].openInterest || 0;
+
+            const mergedCandles = candles.map(c => {
+                const oi = oiDataMap.get(c.timestamp);
+                if (oi !== undefined) lastKnownOI = oi;
+                
+                return {
+                    ...c,
+                    openInterest: lastKnownOI,
+                    takerBuyBaseVolume: c.takerBuyBaseVolume || 0
+                };
+            });
+
+            const filtered = mergedCandles.filter(c => c.timestamp >= startTime && c.timestamp <= endTime);
+            allCandles.push(...filtered);
+
+            if (candles.length < klineLimit) break;
+            const lastCandleTime = candles[candles.length - 1].timestamp;
+            if (lastCandleTime >= endTime) break;
+
+            currentTime = lastCandleTime + timeframeMs;
+        }
+
+        const sorted = allCandles.sort((a, b) => a.timestamp - b.timestamp);
+
+        // 3. Save to Cache
+        if (sorted.length > 0) {
+            db.saveCandles(symbol, timeframe, sorted);
+        }
+
+        return sorted;
+    }
+
+    private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: StrategyEngine): Promise<TradingSignal | null> {
+        let orderFlow = undefined;
+        orderFlow = this.calculateOrderFlowMetrics(candles);
+        const marketData = {
+            symbol,
+            candles: candles,
+            lastPrice: candles[candles.length - 1].close,
+            volume24h: 0,
+            priceChange24h: 0,
+            orderFlow: orderFlow 
+        };
+        return await strategy.analyze(marketData);
+    }
+
+    // private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined {
+    //     if (candles.length < 2) return undefined;
+
+    //     const current = candles[candles.length - 1];
+    //     const prev = candles[candles.length - 2];
+
+    //     // Delta
+    //     const delta = (2 * current.takerBuyBaseVolume) - current.volume;
+
+    //     // OI Change %
+    //     let oiChange = 0;
+    //     if (prev.openInterest && prev.openInterest > 0) {
+    //         oiChange = ((current.openInterest - prev.openInterest) / prev.openInterest) * 100;
+    //     }
+
+    //     return {
+    //         timestamp: current.timestamp,
+    //         cvd: 0,
+    //         cvdChange: delta,
+    //         oiChange: oiChange,
+    //         oiAccel: 0,
+    //         liquidationsLong: 0,
+    //         liquidationsShort: 0
+    //     };
+    // }
+
+    // --- STANDARD EXECUTION LOGIC ---
+    
+private calculateOrderFlowMetrics(candles: Candle[]): OrderFlowData | undefined {
+        if (candles.length < 2) return undefined;
+
+        const current = candles[candles.length - 1];
+        const prev = candles[candles.length - 2];
+
+        // 1. Нормализованная Дельта (Normalized CVD)
+        // Формула: (TakerBuy - TakerSell) / TotalVolume
+        // Результат всегда от -1 (все продают) до +1 (все покупают)
+        let normalizedDelta = 0;
+        if (current.volume > 0) {
+            const takerBuy = current.takerBuyBaseVolume;
+            const takerSell = current.volume - takerBuy;
+            normalizedDelta = (takerBuy - takerSell) / current.volume;
+        }
+
+        // 2. OI Change % (Без изменений)
+        let oiChange = 0;
+        if (prev.openInterest && prev.openInterest > 0) {
+            oiChange = ((current.openInterest - prev.openInterest) / prev.openInterest) * 100;
+        }
+
+        return {
+            timestamp: current.timestamp,
+            cvd: 0, 
+            cvdChange: normalizedDelta, // ТЕПЕРЬ ЗДЕСЬ ЗНАЧЕНИЕ ОТ -1 ДО 1
+            oiChange: oiChange,
+            oiAccel: 0,
+            liquidationsLong: 0, // В бэктесте их нет
+            liquidationsShort: 0
+        };
+    }
 
     private tryOpenPosition(signal: TradingSignal, candle: Candle, config: BacktestConfig, currentEquity: number) {
         const leverage = config.risk.leverage;
@@ -216,14 +421,10 @@ export class BacktestEngine {
 
         let currentRiskExposure = 0;
         for (const pos of this.activePositions) {
-            const riskDollars = (Math.abs(pos.entry - pos.stopLoss) / pos.entry) * pos.size;
-            currentRiskExposure += riskDollars;
+            currentRiskExposure += (Math.abs(pos.entry - pos.stopLoss) / pos.entry) * pos.size;
         }
-
         const newTradeRisk = (Math.abs(signal.entry - signal.stopLoss) / signal.entry) * positionSizeUSDT;
-        const maxRiskAllowed = currentEquity * this.maxRiskExposureRatio;
-
-        if ((currentRiskExposure + newTradeRisk) > maxRiskAllowed) return;
+        if ((currentRiskExposure + newTradeRisk) > currentEquity * this.maxRiskExposureRatio) return;
 
         const position: Position = {
             id: Helpers.generateId(),
@@ -245,15 +446,9 @@ export class BacktestEngine {
         this.totalFeesPaid += entryFee;
 
         const date = new Date(candle.timestamp);
-    
-        // Форматируем в: YYYY-MM-DD HH:mm:ss
         const readableTime = date.toISOString().replace('T', ' ').substring(0, 19);
-    
-        console.log(`\n✅ OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${signal.entry}`);
+        console.log(`\n☑️ OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${signal.entry} (Conf: ${signal.confidence.toFixed(2)})`);
         this.activePositions.push(position);
-
-        // Лог открытия (опционально)
-        // console.log(`   🚀 Open ${position.symbol} ${position.side} @ ${position.entry}`);
     }
 
     private checkPositionExit(position: Position, currentCandle: Candle): TradeResult | null {
@@ -266,13 +461,9 @@ export class BacktestEngine {
         const liqPriceShort = position.entry * (1 + (1 / position.leverage) - 0.005);
 
         if (isLong && currentCandle.low <= liqPriceLong) {
-            exitReason = TradeExitReason.STOP_LOSS;
-            exitPrice = liqPriceLong;
-            isLiquidation = true;
+            exitReason = TradeExitReason.STOP_LOSS; exitPrice = liqPriceLong; isLiquidation = true;
         } else if (!isLong && currentCandle.high >= liqPriceShort) {
-            exitReason = TradeExitReason.STOP_LOSS;
-            exitPrice = liqPriceShort;
-            isLiquidation = true;
+            exitReason = TradeExitReason.STOP_LOSS; exitPrice = liqPriceShort; isLiquidation = true;
         }
 
         if (!exitReason) {
@@ -282,21 +473,11 @@ export class BacktestEngine {
             const hitTP_Short = currentCandle.low <= position.takeProfit;
 
             if (isLong) {
-                if (hitSL_Long) {
-                    exitReason = TradeExitReason.STOP_LOSS;
-                    exitPrice = position.stopLoss * (1 - SLIPPAGE_PERCENT);
-                } else if (hitTP_Long) {
-                    exitReason = TradeExitReason.TAKE_PROFIT;
-                    exitPrice = position.takeProfit;
-                }
+                if (hitSL_Long) { exitReason = TradeExitReason.STOP_LOSS; exitPrice = position.stopLoss * (1 - SLIPPAGE_PERCENT); }
+                else if (hitTP_Long) { exitReason = TradeExitReason.TAKE_PROFIT; exitPrice = position.takeProfit; }
             } else {
-                if (hitSL_Short) {
-                    exitReason = TradeExitReason.STOP_LOSS;
-                    exitPrice = position.stopLoss * (1 + SLIPPAGE_PERCENT);
-                } else if (hitTP_Short) {
-                    exitReason = TradeExitReason.TAKE_PROFIT;
-                    exitPrice = position.takeProfit;
-                }
+                if (hitSL_Short) { exitReason = TradeExitReason.STOP_LOSS; exitPrice = position.stopLoss * (1 + SLIPPAGE_PERCENT); }
+                else if (hitTP_Short) { exitReason = TradeExitReason.TAKE_PROFIT; exitPrice = position.takeProfit; }
             }
         }
 
@@ -341,7 +522,6 @@ export class BacktestEngine {
     private calculateEquity(timestamp: number, currentPrices: Record<string, Candle>): number {
         let floatingPnL = 0;
         let estimatedExitFees = 0;
-
         for (const pos of this.activePositions) {
             const candle = currentPrices[pos.symbol];
             if (candle) {
@@ -349,8 +529,7 @@ export class BacktestEngine {
                 const isLong = pos.side === PositionSide.LONG;
                 const pnlData = Helpers.calculatePnL(pos.entry, currentPrice, pos.size, isLong, pos.leverage);
                 floatingPnL += pnlData.pnl;
-                const exitNotional = pos.size * (currentPrice / pos.entry);
-                estimatedExitFees += exitNotional * BINANCE_TAKER_FEE;
+                estimatedExitFees += pos.size * (currentPrice / pos.entry) * BINANCE_TAKER_FEE;
             }
         }
         return this.walletBalance + floatingPnL - estimatedExitFees;
@@ -370,72 +549,6 @@ export class BacktestEngine {
         return snapshot;
     }
 
-    private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: StrategyEngine): Promise<TradingSignal | null> {
-        const marketData = {
-            symbol,
-            candles: candles,
-            lastPrice: candles[candles.length - 1].close,
-            volume24h: 0,
-            priceChange24h: 0
-        };
-        return await strategy.analyze(marketData);
-    }
-
-    private async fetchAllMarketData(config: BacktestConfig): Promise<Record<string, Candle[]>> {
-        const data: Record<string, Candle[]> = {};
-        logger.info('Backtest', 'Fetching historical data...');
-        for (const symbol of config.symbols) {
-            process.stdout.write(`Fetching ${symbol}... `);
-            const candles = await this.fetchHistoricalData(symbol, config.startDate, config.endDate);
-            if (candles.length > 0) {
-                data[symbol] = candles;
-                console.log(`OK (${candles.length})`);
-            } else console.log(`FAIL`);
-        }
-        console.log('');
-        return data;
-    }
-
-    private async fetchHistoricalData(symbol: string, startDate: Date, endDate: Date): Promise<Candle[]> {
-        const timeframe = config.getConfig().timeframe;
-        const startTime = startDate.getTime();
-        const endTime = endDate.getTime();
-
-        // 1. Check if we have cached data
-        if (db.hasDataForRange(symbol, timeframe, startTime, endTime)) {
-            const cached = db.getCandles(symbol, timeframe, startTime, endTime);
-            console.log(`[CACHE] Using cached data (${cached.length} candles)`);
-            return cached as Candle[];
-        }
-
-        // 2. Fetch from Binance API
-        console.log(`[API] Loading from Binance...`);
-        const allCandles: Candle[] = [];
-        let currentTime = startTime;
-        let timeframeMs = timeframe === '15m' ? 900000 : 300000;
-
-        while (currentTime < endTime) {
-            await Helpers.sleep(20);
-            const candles = await this.binance.getCandles(symbol, timeframe, 1000, currentTime);
-            if (candles.length === 0) break;
-            const filtered = candles.filter(c => c.timestamp >= startTime && c.timestamp <= endTime);
-            allCandles.push(...filtered);
-            if (candles.length < 1000) break;
-            const lastCandleTime = candles[candles.length - 1].timestamp;
-            if (lastCandleTime >= endTime) break;
-            currentTime = lastCandleTime + timeframeMs;
-        }
-
-        const sorted = allCandles.sort((a, b) => a.timestamp - b.timestamp);
-
-        // 3. Save to cache for future use
-        if (sorted.length > 0) {
-            db.saveCandles(symbol, timeframe, sorted);
-        }
-
-        return sorted;
-    }
-
     private calculateResults(config: BacktestConfig): BacktestResult {
         const results = this.closedTrades;
         const wins = results.filter(r => r.won);
@@ -452,7 +565,6 @@ export class BacktestEngine {
             const prev = this.equityCurve[i - 1].equity;
             return ((point.equity - prev) / prev) * 100;
         });
-
         const equities = this.equityCurve.map(p => p.equity);
         const maxDD = Helpers.maxDrawdown(equities);
 
@@ -485,7 +597,7 @@ export class BacktestEngine {
 
     private displaySummary(result: BacktestResult): void {
         console.log('\n╔═══════════════════════════════════════════════════════════╗');
-        console.log('║           PORTFOLIO BACKTEST RESULTS (V6 LOGS)            ║');
+        console.log('║           PORTFOLIO BACKTEST RESULTS (WITH ORDER FLOW)    ║');
         console.log('╚═══════════════════════════════════════════════════════════╝\n');
         console.log(`📊 Trades: ${result.totalTrades} (W: ${result.winningTrades} / L: ${result.losingTrades})`);
         console.log(`   Win Rate: ${result.winRate.toFixed(2)}%`);
