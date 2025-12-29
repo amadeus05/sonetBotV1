@@ -244,6 +244,12 @@ export class BacktestEngine {
         this.walletBalance = this.freeBalance + this.lockedMargin;
         this.totalFeesPaid += entryFee;
 
+        const date = new Date(candle.timestamp);
+    
+        // Форматируем в: YYYY-MM-DD HH:mm:ss
+        const readableTime = date.toISOString().replace('T', ' ').substring(0, 19);
+    
+        console.log(`\n✅ OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${signal.entry}`);
         this.activePositions.push(position);
 
         // Лог открытия (опционально)
