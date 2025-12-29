@@ -1,7 +1,7 @@
 /**
  * Order Flow Validator
  * Responsibility: Validate signals using order flow data (CVD, OI, Liquidations)
- * This adds extra confirmation layer - use when data is available
+ * UPDATED: V7 Logic (Normalized CVD & Adaptive Scoring)
  */
 
 import { OrderFlowData, OrderFlowConfirmation, TrendDirection } from '../types';
@@ -15,10 +15,10 @@ export class OrderFlowValidator {
     orderFlow: OrderFlowData | undefined,
     direction: TrendDirection
   ): OrderFlowConfirmation {
-    // If no order flow data, return neutral confirmation
+    // If no order flow data, return neutral confirmation (don't block trades)
     if (!orderFlow) {
       return {
-        confirmed: true, // Don't block trades if data unavailable
+        confirmed: true, 
         cvdAligned: true,
         oiConfirmed: true,
         liquidationsSupport: true,
@@ -28,21 +28,26 @@ export class OrderFlowValidator {
 
     const strategyConfig = config.getStrategyConfig();
 
-    // Check CVD alignment
-    const cvdAligned = this.checkCVDAlignment(orderFlow, direction, strategyConfig);
+    // 1. Check CVD Alignment (Normalized -1 to 1)
+    const cvdAligned = this.checkCVDAlignment(orderFlow, direction);
 
-    // Check OI confirmation
-    const oiConfirmed = this.checkOIConfirmation(orderFlow, direction, strategyConfig);
+    // 2. Check OI Confirmation
+    const oiConfirmed = this.checkOIConfirmation(orderFlow, direction);
 
-    // Check liquidations support
-    const liquidationsSupport = this.checkLiquidations(orderFlow, direction);
+    // 3. Check Liquidations (Adaptive)
+    // In backtest, liquidation data is usually 0. We shouldn't penalize the score for this.
+    const hasLiquidationData = orderFlow.liquidationsLong > 0 || orderFlow.liquidationsShort > 0;
+    
+    const liquidationsSupport = hasLiquidationData 
+        ? this.checkLiquidations(orderFlow, direction)
+        : true; // Pass by default if data is missing
 
-    // Calculate overall score
-    const score = this.calculateScore(cvdAligned, oiConfirmed, liquidationsSupport);
+    // 4. Calculate Score based on available data
+    const score = this.calculateScore(cvdAligned, oiConfirmed, liquidationsSupport, hasLiquidationData);
 
-    // Overall confirmation (require at least 2 of 3)
-    const confirmedCount = [cvdAligned, oiConfirmed, liquidationsSupport].filter(Boolean).length;
-    const confirmed = confirmedCount >= 2;
+    // 5. Overall confirmation logic
+    // We require a good score (> 0.5) AND at least one primary factor (CVD or OI)
+    const confirmed = score >= 0.5 && (cvdAligned || oiConfirmed);
 
     return {
       confirmed,
@@ -55,22 +60,26 @@ export class OrderFlowValidator {
 
   /**
    * Check CVD (Cumulative Volume Delta) alignment
+   * Expects normalized CVD (-1 to 1)
    */
   private checkCVDAlignment(
     orderFlow: OrderFlowData,
-    direction: TrendDirection,
-    config: any
+    direction: TrendDirection
   ): boolean {
-    const cvdChange = orderFlow.cvdChange;
+    const delta = orderFlow.cvdChange;
+    
+    // Threshold: 0.02 means 2% more buy volume than sell volume (or vice versa).
+    // This is sensitive enough for small timeframes.
+    const threshold = 0.02; 
 
-    // For long: CVD should be positive (buyers dominating)
+    // For LONG: We want positive Delta (Buyers > Sellers)
     if (direction === TrendDirection.BULLISH) {
-      return cvdChange > config.cvdThreshold;
+      return delta > threshold;
     }
 
-    // For short: CVD should be negative (sellers dominating)
+    // For SHORT: We want negative Delta (Sellers > Buyers)
     if (direction === TrendDirection.BEARISH) {
-      return cvdChange < -config.cvdThreshold;
+      return delta < -threshold;
     }
 
     return false;
@@ -81,23 +90,23 @@ export class OrderFlowValidator {
    */
   private checkOIConfirmation(
     orderFlow: OrderFlowData,
-    direction: TrendDirection,
-    config: any
+    direction: TrendDirection
   ): boolean {
-    const oiChange = orderFlow.oiChange;
+    const oiChange = orderFlow.oiChange; // in Percent
+    const minOIChange = 0.05; // 0.05% change per candle
 
-    // Rising OI = new money entering
-    // Ideal: OI increases in direction of trend
+    // Rising OI indicates new money entering the market, confirming the move.
     
     if (direction === TrendDirection.BULLISH) {
-      // For longs: prefer rising OI (new longs opening)
-      return oiChange > config.oiChangeMin;
+      // For Longs: We want rising OI (Aggressive buying)
+      return oiChange > minOIChange;
     }
 
     if (direction === TrendDirection.BEARISH) {
-      // For shorts: prefer rising OI (new shorts opening)
-      // OR falling OI with price falling (longs closing)
-      return oiChange > config.oiChangeMin || oiChange < -config.oiChangeMin;
+      // For Shorts: 
+      // 1. Rising OI (Aggressive shorting) -> Strongest signal
+      // 2. Falling OI (Longs liquidation/puking) -> Can also drive price down
+      return oiChange > minOIChange || oiChange < -minOIChange;
     }
 
     return false;
@@ -112,14 +121,14 @@ export class OrderFlowValidator {
   ): boolean {
     const { liquidationsLong, liquidationsShort } = orderFlow;
 
-    // For long entries: prefer short liquidations (shorts getting rekt)
+    // For BULLISH move: We like to see Shorts getting liquidated (Short Squeeze fuel)
     if (direction === TrendDirection.BULLISH) {
-      return liquidationsShort > liquidationsLong * 1.5;
+      return liquidationsShort > liquidationsLong;
     }
 
-    // For short entries: prefer long liquidations (longs getting rekt)
+    // For BEARISH move: We like to see Longs getting liquidated (Long Squeeze fuel)
     if (direction === TrendDirection.BEARISH) {
-      return liquidationsLong > liquidationsShort * 1.5;
+      return liquidationsLong > liquidationsShort;
     }
 
     return false;
@@ -131,19 +140,29 @@ export class OrderFlowValidator {
   private calculateScore(
     cvdAligned: boolean,
     oiConfirmed: boolean,
-    liquidationsSupport: boolean
+    liquidationsSupport: boolean,
+    hasLiquidationData: boolean
   ): number {
     let score = 0;
 
-    if (cvdAligned) score += 0.4;
-    if (oiConfirmed) score += 0.3;
-    if (liquidationsSupport) score += 0.3;
+    if (hasLiquidationData) {
+        // Scenario: Real-time trading (All data available)
+        if (cvdAligned) score += 0.4;
+        if (oiConfirmed) score += 0.3;
+        if (liquidationsSupport) score += 0.3;
+    } else {
+        // Scenario: Backtest (Only CVD and OI available)
+        // Redistribute weights
+        if (cvdAligned) score += 0.6; // CVD is the most important
+        if (oiConfirmed) score += 0.4;
+    }
 
     return score;
   }
 
   /**
    * Detect order flow divergence (warning sign)
+   * Example: Price UP but CVD DOWN (Absorption/Limit Sellers)
    */
   public detectDivergence(
     orderFlow: OrderFlowData,
@@ -151,13 +170,13 @@ export class OrderFlowValidator {
   ): boolean {
     if (!orderFlow) return false;
 
-    // Price going up but CVD negative = bearish divergence
-    if (priceDirection === TrendDirection.BULLISH && orderFlow.cvdChange < -0.5) {
+    // Price BULLISH but CVD BEARISH (Strong selling into buying)
+    if (priceDirection === TrendDirection.BULLISH && orderFlow.cvdChange < -0.05) {
       return true;
     }
 
-    // Price going down but CVD positive = bullish divergence
-    if (priceDirection === TrendDirection.BEARISH && orderFlow.cvdChange > 0.5) {
+    // Price BEARISH but CVD BULLISH (Strong buying into selling)
+    if (priceDirection === TrendDirection.BEARISH && orderFlow.cvdChange > 0.05) {
       return true;
     }
 
@@ -165,41 +184,27 @@ export class OrderFlowValidator {
   }
 
   /**
-   * Check if order flow shows strong conviction
-   */
-  public hasStrongConviction(orderFlow: OrderFlowData | undefined): boolean {
-    if (!orderFlow) return false;
-
-    // Strong conviction = high CVD change + high OI change
-    const strongCVD = Math.abs(orderFlow.cvdChange) > 1.0;
-    const strongOI = Math.abs(orderFlow.oiChange) > 0.2;
-
-    return strongCVD && strongOI;
-  }
-
-  /**
-   * Get order flow summary
+   * Get order flow summary for logs
    */
   public getOrderFlowSummary(confirmation: OrderFlowConfirmation): string {
-    const emoji = confirmation.confirmed ? '✅' : '❌';
+    const emoji = confirmation.confirmed ? '✅' : '⚠️';
     const scorePercent = (confirmation.score * 100).toFixed(0);
 
     const details: string[] = [];
-    if (confirmation.cvdAligned) details.push('CVD✓');
-    if (confirmation.oiConfirmed) details.push('OI✓');
-    if (confirmation.liquidationsSupport) details.push('LIQ✓');
+    details.push(confirmation.cvdAligned ? 'CVD+' : 'CVD-');
+    details.push(confirmation.oiConfirmed ? 'OI+' : 'OI-');
+    
+    // Only show Liq status if it was actually checked (score < 1.0 implies strict checking or missing data handling)
+    if (confirmation.liquidationsSupport) details.push('LIQ+');
 
-    return `${emoji} OrderFlow: ${scorePercent}% | ${details.join(' ')}`;
+    return `${emoji} OF:${scorePercent}% [${details.join(' ')}]`;
   }
 
   /**
-   * Calculate order flow confidence multiplier (0.5 - 1.5)
-   * Used to adjust position size or skip trades
+   * Calculate order flow confidence multiplier
    */
   public getConfidenceMultiplier(confirmation: OrderFlowConfirmation): number {
-    // Base multiplier is 1.0
-    // Perfect order flow = 1.5x
-    // Poor order flow = 0.5x
-    return 0.5 + (confirmation.score * 1.0);
+    // 0.8 (Weak) to 1.2 (Strong)
+    return 0.8 + (confirmation.score * 0.4);
   }
 }
