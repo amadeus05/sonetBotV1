@@ -1,6 +1,7 @@
 /**
  * Binance Exchange Service
  * Responsibility: Handle all communication with Binance API
+ * PATCHED: quantity/price normalization, reduceOnly, recvWindow, safer positionRisk
  */
 
 import axios, { AxiosInstance } from 'axios';
@@ -22,6 +23,9 @@ export class BinanceService {
 
   // Cache for Step Sizes (e.g. BTCUSDT -> 0.001, 1000PEPEUSDT -> 1)
   private stepSizeCache: Record<string, number> = {};
+  private tickSizeCache: Record<string, number> = {};
+
+  private readonly recvWindow = 5000;
 
   constructor() {
     const botConfig = config.getConfig();
@@ -53,24 +57,38 @@ export class BinanceService {
   }
 
   /**
-   * Load exchange info to cache symbol precisions (Lot Size)
+   * Normalize quantity according to symbol step size
+   */
+  private normalizeQuantity(symbol: string, quantity: number): number {
+    const step = this.stepSizeCache[symbol] ?? 0.001;
+    return Math.floor(quantity / step) * step;
+  }
+
+  /**
+   * Normalize price according to symbol tick size
+   */
+  private normalizePrice(symbol: string, price: number): number {
+    const tick = this.tickSizeCache[symbol] ?? 0.01;
+    return Math.round(price / tick) * tick;
+  }
+
+  /**
+   * Load exchange info to cache symbol precisions (Lot Size & Tick Size)
    * MUST be called at bot startup
    */
   public async loadExchangeInfo(): Promise<void> {
     try {
       const response = await this.client.get('/fapi/v1/exchangeInfo');
-      
       const symbols = response.data.symbols;
       let count = 0;
-      
+
       for (const symbolData of symbols) {
-        // Find LOT_SIZE filter to get stepSize
-        const lotSizeFilter = symbolData.filters.find((f: any) => f.filterType === 'LOT_SIZE');
-        
-        if (lotSizeFilter) {
-          this.stepSizeCache[symbolData.symbol] = parseFloat(lotSizeFilter.stepSize);
-          count++;
-        }
+        const lotSize = symbolData.filters.find((f: any) => f.filterType === 'LOT_SIZE');
+        const priceFilter = symbolData.filters.find((f: any) => f.filterType === 'PRICE_FILTER');
+
+        if (lotSize) this.stepSizeCache[symbolData.symbol] = parseFloat(lotSize.stepSize);
+        if (priceFilter) this.tickSizeCache[symbolData.symbol] = parseFloat(priceFilter.tickSize);
+        count++;
       }
 
       logger.info('BinanceService', `Loaded exchange info for ${count} symbols`);
@@ -99,16 +117,16 @@ export class BinanceService {
   public async getPositionRisk(symbol: string): Promise<{ positionAmt: number; entryPrice: number; unrealizedProfit: number } | null> {
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&timestamp=${timestamp}`;
+      const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.get('/fapi/v2/positionRisk', {
-        params: { symbol, timestamp, signature }
+        params: { timestamp, recvWindow: this.recvWindow, signature }
       });
 
-      // API returns an array for the specific symbol
-      const data = response.data[0] || response.data;
-      
+      const data = response.data.find((p: any) => p.symbol === symbol);
+      if (!data) return null;
+
       return {
         positionAmt: parseFloat(data.positionAmt),
         entryPrice: parseFloat(data.entryPrice),
@@ -126,7 +144,7 @@ export class BinanceService {
   public async getCandles(
     symbol: string,
     interval: string = '5m',
-    limit: number = 1000, // Binance max is 1000 for klines
+    limit: number = 1000,
     startTime?: number,
     endTime?: number
   ): Promise<Candle[]> {
@@ -145,9 +163,8 @@ export class BinanceService {
         low: parseFloat(kline[3]),
         close: parseFloat(kline[4]),
         volume: parseFloat(kline[5]),
-        // Index 9 is Taker Buy Base Asset Volume
-        takerBuyBaseVolume: parseFloat(kline[9]), 
-        openInterest: 0 // Default 0, will be populated separately
+        takerBuyBaseVolume: parseFloat(kline[9]),
+        openInterest: 0
       }));
     } catch (error: any) {
       logger.error('BinanceService', `Failed to fetch candles for ${symbol}`, error.message);
@@ -155,7 +172,7 @@ export class BinanceService {
     }
   }
 
-    /**
+  /**
    * NEW: Get Historical Open Interest
    * Note: Limit max is usually 500 for this endpoint
    */
@@ -174,7 +191,6 @@ export class BinanceService {
       const response = await this.client.get('/futures/data/openInterestHist', { params });
       return response.data;
     } catch (error: any) {
-      // OI history is not critical to crash, but strictly needed for OF strategy
       logger.warn('BinanceService', `Failed to fetch OI history for ${symbol}`, error.message);
       return [];
     }
@@ -234,11 +250,11 @@ export class BinanceService {
   public async getBalance(): Promise<ExchangeBalance[]> {
     try {
       const timestamp = Date.now();
-      const queryString = `timestamp=${timestamp}`;
+      const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.get('/fapi/v2/balance', {
-        params: { timestamp, signature }
+        params: { timestamp, recvWindow: this.recvWindow, signature }
       });
 
       return response.data.map((balance: any) => ({
@@ -259,11 +275,11 @@ export class BinanceService {
   public async getAccountInfo(): Promise<any> {
     try {
       const timestamp = Date.now();
-      const queryString = `timestamp=${timestamp}`;
+      const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.get('/fapi/v2/account', {
-        params: { timestamp, signature }
+        params: { timestamp, recvWindow: this.recvWindow, signature }
       });
 
       return response.data;
@@ -279,11 +295,11 @@ export class BinanceService {
   public async setLeverage(symbol: string, leverage: number): Promise<void> {
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&leverage=${leverage}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&leverage=${leverage}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       await this.client.post('/fapi/v1/leverage', null, {
-        params: { symbol, leverage, timestamp, signature }
+        params: { symbol, leverage, timestamp, recvWindow: this.recvWindow, signature }
       });
 
       logger.info('BinanceService', `Set leverage to ${leverage}x for ${symbol}`);
@@ -302,23 +318,17 @@ export class BinanceService {
     quantity: number
   ): Promise<ExchangeOrder> {
     try {
+      const q = this.normalizeQuantity(symbol, quantity);
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=MARKET&quantity=${quantity}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=MARKET&quantity=${q}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
-        params: {
-          symbol,
-          side,
-          type: 'MARKET',
-          quantity,
-          timestamp,
-          signature
-        }
+        params: { symbol, side, type: 'MARKET', quantity: q, timestamp, recvWindow: this.recvWindow, signature }
       });
 
       logger.trade(symbol, `${side} MARKET order placed`, {
-        quantity,
+        quantity: q,
         orderId: response.data.orderId
       });
 
@@ -348,31 +358,25 @@ export class BinanceService {
     stopPrice: number
   ): Promise<ExchangeOrder> {
     try {
+      const q = this.normalizeQuantity(symbol, quantity);
+      const p = this.normalizePrice(symbol, stopPrice);
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&quantity=${quantity}&stopPrice=${stopPrice}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
-        params: {
-          symbol,
-          side,
-          type: 'STOP_MARKET',
-          quantity,
-          stopPrice,
-          timestamp,
-          signature
-        }
+        params: { symbol, side, type: 'STOP_MARKET', quantity: q, stopPrice: p, reduceOnly: true, timestamp, recvWindow: this.recvWindow, signature }
       });
 
-      logger.trade(symbol, `STOP LOSS order placed at ${stopPrice}`, { quantity });
+      logger.trade(symbol, `STOP LOSS order placed at ${p}`, { quantity: q });
 
       return {
         orderId: response.data.orderId.toString(),
         symbol: response.data.symbol,
         side,
         type: 'STOP_LOSS',
-        quantity,
-        stopPrice,
+        quantity: q,
+        stopPrice: p,
         status: response.data.status,
         timestamp: response.data.updateTime
       };
@@ -392,31 +396,25 @@ export class BinanceService {
     price: number
   ): Promise<ExchangeOrder> {
     try {
+      const q = this.normalizeQuantity(symbol, quantity);
+      const p = this.normalizePrice(symbol, price);
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&quantity=${quantity}&stopPrice=${price}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
-        params: {
-          symbol,
-          side,
-          type: 'TAKE_PROFIT_MARKET',
-          quantity,
-          stopPrice: price,
-          timestamp,
-          signature
-        }
+        params: { symbol, side, type: 'TAKE_PROFIT_MARKET', quantity: q, stopPrice: p, reduceOnly: true, timestamp, recvWindow: this.recvWindow, signature }
       });
 
-      logger.trade(symbol, `TAKE PROFIT order placed at ${price}`, { quantity });
+      logger.trade(symbol, `TAKE PROFIT order placed at ${p}`, { quantity: q });
 
       return {
         orderId: response.data.orderId.toString(),
         symbol: response.data.symbol,
         side,
         type: 'TAKE_PROFIT',
-        quantity,
-        price,
+        quantity: q,
+        price: p,
         status: response.data.status,
         timestamp: response.data.updateTime
       };
@@ -432,11 +430,11 @@ export class BinanceService {
   public async cancelOrder(symbol: string, orderId: string): Promise<void> {
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       await this.client.delete('/fapi/v1/order', {
-        params: { symbol, orderId, timestamp, signature }
+        params: { symbol, orderId, timestamp, recvWindow: this.recvWindow, signature }
       });
 
       logger.trade(symbol, `Order ${orderId} cancelled`);
@@ -452,12 +450,12 @@ export class BinanceService {
   public async getOpenOrders(symbol?: string): Promise<ExchangeOrder[]> {
     try {
       const timestamp = Date.now();
-      let queryString = `timestamp=${timestamp}`;
+      let queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       if (symbol) queryString = `symbol=${symbol}&${queryString}`;
       
       const signature = this.generateSignature(queryString);
 
-      const params: any = { timestamp, signature };
+      const params: any = { timestamp, recvWindow: this.recvWindow, signature };
       if (symbol) params.symbol = symbol;
 
       const response = await this.client.get('/fapi/v1/openOrders', { params });
