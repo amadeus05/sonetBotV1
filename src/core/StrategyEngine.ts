@@ -18,9 +18,8 @@ import {
   import { RegimeDetector } from '../modules/RegimeDetector';
   import { OrderFlowValidator } from '../modules/OrderFlowValidator';
   import { RiskManager } from './RiskManager';
-  import { config } from '../config/ConfigManager';
+  import { SessionFilter, MarketSession } from '../utils/SessionFilter'; 
   import { logger } from '../services/Logger';
-  import { Helpers } from '../utils/Helpers';
   
   export class StrategyEngine {
     private trendAnalyzer: TrendAnalyzer;
@@ -112,6 +111,9 @@ import {
         });
         return null;
       }
+
+      const currentTimestamp = candles[candles.length - 1].timestamp;
+      const session = SessionFilter.getSession(currentTimestamp);
   
       // STEP 6: Generate Signal
       const signal = this.generateSignal(
@@ -123,7 +125,8 @@ import {
           momentum,
           pullback,
           orderFlow: orderFlowConfirmation,
-          regime
+          regime,
+          session,
         }
       );
   
@@ -249,6 +252,9 @@ import {
      */
     private generateTags(analysis: any): string[] {
       const tags: string[] = [];
+
+      // Add Session Tag
+      tags.push(`session:${analysis.session}`);
   
       // Regime tag
       tags.push(`regime:${analysis.regime}`);
@@ -272,11 +278,11 @@ import {
       }
   
       // Order flow tags
-      if (analysis.orderFlow) {
-        if (analysis.orderFlow.cvdAligned) tags.push('cvd_aligned');
-        if (analysis.orderFlow.oiConfirmed) tags.push('oi_confirmed');
-        if (analysis.orderFlow.liquidationsSupport) tags.push('liq_support');
-      }
+      // if (analysis.orderFlow) {
+      //   if (analysis.orderFlow.cvdAligned) tags.push('cvd_aligned');
+      //   if (analysis.orderFlow.oiConfirmed) tags.push('oi_confirmed');
+      //   if (analysis.orderFlow.liquidationsSupport) tags.push('liq_support');
+      // }
   
       return tags;
     }
