@@ -1,18 +1,23 @@
 /**
- * Trend Analyzer
- * Responsibility: Determine market trend direction and strength
- * Using EMA crossover and trend structure analysis
+ * Trend Analyzer (Institutional Grade)
+ * Responsibility: Determine market trend direction and QUALITY strength
+ * UPDATED based on Pro Feedback:
+ * 1. Overextension penalty (don't buy tops)
+ * 2. Candle quality check (ignore doji/noise)
+ * 3. Dynamic structure lookback
+ * 4. Regime integration
  */
 
-import { Candle, TrendDirection, TrendAnalysis } from '../types';
+import { Candle, TrendDirection, TrendAnalysis, MarketRegime } from '../types';
 import { TechnicalIndicators } from '../utils/TechnicalIndicators';
 import { config } from '../config/ConfigManager';
 
 export class TrendAnalyzer {
   /**
-   * Analyze trend using EMAs and price structure
+   * Analyze trend using EMAs, price structure, and candle quality
+   * @param regime (Optional) Pass current market regime for context-aware scoring
    */
-  public analyze(candles: Candle[]): TrendAnalysis {
+  public analyze(candles: Candle[], regime?: MarketRegime): TrendAnalysis {
     const closes = candles.map(c => c.close);
     const strategyConfig = config.getStrategyConfig();
 
@@ -29,24 +34,33 @@ export class TrendAnalyzer {
     const currentEmaSlow = emaSlow[emaSlow.length - 1];
     const currentPrice = closes[closes.length - 1];
 
-    // Calculate trend direction
+    // 1. Determine Trend Direction
     const direction = this.determineTrendDirection(
       currentPrice,
       currentEmaFast,
       currentEmaSlow
     );
 
-    // Calculate trend strength
-    const strength = this.calculateTrendStrength(
+    // 2. Calculate Trend Strength (The "Quality" Score)
+    let strength = this.calculateTrendStrength(
+      currentPrice,
       currentEmaFast,
       currentEmaSlow,
-      candles
+      candles,
+      strategyConfig.emaSlow // Pass slow period for dynamic structure lookback
     );
 
-    // Check if trend is strong enough
-    const priceDiff = Math.abs(currentEmaFast - currentEmaSlow);
-    const diffPercent = (priceDiff / currentEmaSlow) * 100;
-    const isStrong = diffPercent >= (strategyConfig.minTrendStrength * 100) && strength > 0.5;
+    // 3. Regime Integration (Feedback Point #5)
+    // Если режим известен и он НЕ трендовый, мы штрафуем силу тренда.
+    // Это фильтрует ложные пробои во флете.
+    if (regime && regime !== MarketRegime.TRENDING) {
+      strength *= 0.5;
+    }
+
+    // 4. Simplified isStrong Logic (Feedback Point #4)
+    // Убрали двойной фильтр (diffPercent && strength).
+    // Теперь strength — это и есть главный показатель качества.
+    const isStrong = strength > 0.6;
 
     return {
       direction,
@@ -75,66 +89,85 @@ export class TrendAnalyzer {
       return TrendDirection.BEARISH;
     }
 
-    // Neutral or transitioning
+    // Neutral or transitioning (choppy)
     return TrendDirection.NEUTRAL;
   }
 
   /**
    * Calculate trend strength (0-1)
-   * Higher value = stronger trend
+   * Higher value = stronger, healthier trend
    */
   private calculateTrendStrength(
+    price: number,
     emaFast: number,
     emaSlow: number,
-    candles: Candle[]
+    candles: Candle[],
+    emaSlowPeriod: number
   ): number {
-    // Factor 1: Distance between EMAs
+    // Factor 1: EMA Separation (Trend Momentum)
     const emaDiff = Math.abs(emaFast - emaSlow);
     const emaDistance = (emaDiff / emaSlow) * 100;
-    const distanceScore = Math.min(emaDistance / 5, 1); // Max out at 5% difference
+    // Maximize score at 3% separation, beyond that doesn't add much value
+    const distanceScore = Math.min(emaDistance / 3, 1);
 
-    // Factor 2: Price consistency (are we making HH/HL or LH/LL?)
-    const trendStructure = TechnicalIndicators.detectTrendStructure(candles, 20);
+    // Factor 2: Price Structure (Higher Highs / Lower Lows)
+    // (Feedback Point #3: Dynamic Lookback)
+    // Используем окно относительно медленной EMA, а не хардкод 20
+    const structureLookback = Math.max(emaSlowPeriod, 20);
+    const trendStructure = TechnicalIndicators.detectTrendStructure(candles, structureLookback);
     let structureScore = 0;
 
-    if (emaFast > emaSlow) {
-      // Bullish trend - check for HH and HL
-      if (trendStructure.higherHighs && trendStructure.higherLows) {
-        structureScore = 1;
-      } else if (trendStructure.higherHighs || trendStructure.higherLows) {
-        structureScore = 0.5;
-      }
-    } else {
-      // Bearish trend - check for LH and LL
-      if (trendStructure.lowerHighs && trendStructure.lowerLows) {
-        structureScore = 1;
-      } else if (trendStructure.lowerHighs || trendStructure.lowerLows) {
-        structureScore = 0.5;
-      }
-    }
-
-    // Factor 3: Consecutive candles in trend direction
-    const recentCandles = candles.slice(-10);
-    let consecutiveCount = 0;
     const isBullish = emaFast > emaSlow;
 
-    for (const candle of recentCandles) {
-      const candleBullish = candle.close > candle.open;
-      if (candleBullish === isBullish) {
-        consecutiveCount++;
-      }
+    if (isBullish) {
+      if (trendStructure.higherHighs && trendStructure.higherLows) structureScore = 1;
+      else if (trendStructure.higherHighs || trendStructure.higherLows) structureScore = 0.5;
+    } else {
+      if (trendStructure.lowerHighs && trendStructure.lowerLows) structureScore = 1;
+      else if (trendStructure.lowerHighs || trendStructure.lowerLows) structureScore = 0.5;
     }
 
-    const consistencyScore = consecutiveCount / 10;
+    // Factor 3: Candle Quality (Conviction)
+    // (Feedback Point #2: Better Candle Counting)
+    const recentCandles = candles.slice(-10);
+    let strongCandleCount = 0;
 
-    // Weighted average of all factors
-    const totalScore = (
+    for (const candle of recentCandles) {
+      const body = Math.abs(candle.close - candle.open);
+      const range = candle.high - candle.low;
+
+      // Игнорируем Doji и шум. Считаем только свечи с телом > 50% от диапазона
+      const isQualityCandle = range > 0 && (body / range) > 0.5;
+
+      if (isQualityCandle) {
+        const isCandleBullish = candle.close > candle.open;
+        if (isCandleBullish === isBullish) {
+          strongCandleCount++;
+        }
+      }
+    }
+    const consistencyScore = strongCandleCount / 10;
+
+    // Weighted average of base factors
+    let totalScore = (
       distanceScore * 0.4 +
       structureScore * 0.4 +
       consistencyScore * 0.2
     );
 
-    return Math.min(totalScore, 1);
+    // Factor 4: Overextension Penalty (The "Rubber Band" effect)
+    // (Feedback Point #1: Price vs EMA distance)
+    // Если цена слишком далеко от EMA, тренд истощен и опасен для входа.
+    const priceDistancePct = (Math.abs(price - emaFast) / emaFast) * 100;
+
+    // Если отклонение > 1.5%, начинаем штрафовать
+    if (priceDistancePct > 1.5) {
+      // Штраф растет линейно. При 4.5% отклонения штраф будет максимальным (1.0)
+      const penalty = Math.min((priceDistancePct - 1.5) / 3, 1);
+      totalScore *= (1 - penalty);
+    }
+
+    return Math.max(0, Math.min(totalScore, 1));
   }
 
   /**
@@ -144,8 +177,9 @@ export class TrendAnalyzer {
     if (candles.length < 50) return false;
 
     const closes = candles.map(c => c.close);
-    const emaFast = TechnicalIndicators.ema(closes, 20);
-    const emaSlow = TechnicalIndicators.ema(closes, 50);
+    // Используем более быстрые настройки для детекции разворота
+    const emaFast = TechnicalIndicators.ema(closes, 9); // Было 20
+    const emaSlow = TechnicalIndicators.ema(closes, 21); // Было 50
 
     // Check for EMA crossover
     if (currentTrend === TrendDirection.BULLISH) {
@@ -157,9 +191,6 @@ export class TrendAnalyzer {
     return false;
   }
 
-  /**
-   * Get neutral trend analysis
-   */
   private getNeutralTrend(): TrendAnalysis {
     return {
       direction: TrendDirection.NEUTRAL,
@@ -170,9 +201,6 @@ export class TrendAnalyzer {
     };
   }
 
-  /**
-   * Get trend summary string
-   */
   public getTrendSummary(trend: TrendAnalysis): string {
     const directionEmoji = {
       [TrendDirection.BULLISH]: '📈',
@@ -180,8 +208,11 @@ export class TrendAnalyzer {
       [TrendDirection.NEUTRAL]: '➡️'
     };
 
-    const strengthDesc = trend.strength > 0.7 ? 'STRONG' :
-                        trend.strength > 0.4 ? 'MODERATE' : 'WEAK';
+    // Описательная сила тренда
+    let strengthDesc = 'WEAK';
+    if (trend.strength > 0.8) strengthDesc = 'VERY STRONG';
+    else if (trend.strength > 0.6) strengthDesc = 'STRONG';
+    else if (trend.strength > 0.4) strengthDesc = 'MODERATE';
 
     return `${directionEmoji[trend.direction]} ${trend.direction} (${strengthDesc} ${(trend.strength * 100).toFixed(0)}%)`;
   }
