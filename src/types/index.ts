@@ -19,20 +19,9 @@ export interface Candle {
   openInterest: number;
 }
 
-export interface OrderFlowData {
-  timestamp: number;
-  cvd: number;           // Cumulative Volume Delta
-  cvdChange: number;     // CVD change %
-  oiChange: number;      // Open Interest change %
-  oiAccel: number;       // OI acceleration
-  liquidationsLong: number;
-  liquidationsShort: number;
-}
-
 export interface MarketData {
   symbol: string;
   candles: Candle[];
-  orderFlow?: OrderFlowData;
   lastPrice: number;
 }
 
@@ -88,14 +77,6 @@ export interface PullbackAnalysis {
   isValid: boolean;
 }
 
-export interface OrderFlowConfirmation {
-  confirmed: boolean;
-  cvdAligned: boolean;
-  oiConfirmed: boolean;
-  liquidationsSupport: boolean;
-  score: number;  // 0-1
-}
-
 export enum MarketSession {
   ASIA = 'ASIA',
   LONDON = 'LONDON',
@@ -117,7 +98,6 @@ export interface TradingSignal {
     trend: TrendAnalysis;
     momentum: MomentumSignal;
     pullback: PullbackAnalysis;
-    orderFlow?: OrderFlowConfirmation;
     regime: MarketRegime;
     session: MarketSession;
   };  

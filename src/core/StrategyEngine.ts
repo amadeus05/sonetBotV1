@@ -16,7 +16,6 @@ import {
   import { MomentumDetector } from '../modules/MomentumDetector';
   import { PullbackScanner } from '../modules/PullbackScanner';
   import { RegimeDetector } from '../modules/RegimeDetector';
-  import { OrderFlowValidator } from '../modules/OrderFlowValidator';
   import { RiskManager } from './RiskManager';
   import { SessionFilter, MarketSession } from '../utils/SessionFilter'; 
   import { logger } from '../services/Logger';
@@ -26,7 +25,6 @@ import {
     private momentumDetector: MomentumDetector;
     private pullbackScanner: PullbackScanner;
     private regimeDetector: RegimeDetector;
-    private orderFlowValidator: OrderFlowValidator;
     private riskManager: RiskManager;
   
     constructor(riskManager: RiskManager) {
@@ -34,7 +32,6 @@ import {
       this.momentumDetector = new MomentumDetector();
       this.pullbackScanner = new PullbackScanner();
       this.regimeDetector = new RegimeDetector();
-      this.orderFlowValidator = new OrderFlowValidator();
       this.riskManager = riskManager;
   
       logger.info('StrategyEngine', 'Initialized with all modules');
@@ -44,7 +41,7 @@ import {
      * Main analysis function - generates trading signals
      */
     public async analyze(marketData: MarketData): Promise<TradingSignal | null> {
-      const { symbol, candles, orderFlow } = marketData;
+      const { symbol, candles } = marketData;
   
       logger.debug('StrategyEngine', `Analyzing ${symbol}...`);
   
@@ -111,7 +108,6 @@ import {
           trend,
           momentum,
           pullback,
-          orderFlow: undefined,
           regime,
           session,
         }
@@ -226,11 +222,6 @@ import {
       );
       score += pullbackScore * 0.2;
   
-      // Order flow confirmation (10%)
-      if (analysis.orderFlow) {
-        score += analysis.orderFlow.score * 0.1;
-      }
-  
       return Math.min(score, 1);
     }
   
@@ -263,13 +254,6 @@ import {
       if (analysis.pullback.occurred) {
         tags.push('pullback_entry');
       }
-  
-      // Order flow tags
-      // if (analysis.orderFlow) {
-      //   if (analysis.orderFlow.cvdAligned) tags.push('cvd_aligned');
-      //   if (analysis.orderFlow.oiConfirmed) tags.push('oi_confirmed');
-      //   if (analysis.orderFlow.liquidationsSupport) tags.push('liq_support');
-      // }
   
       return tags;
     }
