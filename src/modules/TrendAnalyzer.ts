@@ -177,9 +177,10 @@ export class TrendAnalyzer {
     if (candles.length < 50) return false;
 
     const closes = candles.map(c => c.close);
+    const strategyConfig = config.getStrategyConfig();
     // Используем более быстрые настройки для детекции разворота
-    const emaFast = TechnicalIndicators.ema(closes, 9); // Было 20
-    const emaSlow = TechnicalIndicators.ema(closes, 21); // Было 50
+    const emaFast = TechnicalIndicators.ema(closes, strategyConfig.emaFast); // Было 20
+    const emaSlow = TechnicalIndicators.ema(closes, strategyConfig.emaSlow); // Было 50
 
     // Check for EMA crossover
     if (currentTrend === TrendDirection.BULLISH) {
