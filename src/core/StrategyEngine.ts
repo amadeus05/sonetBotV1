@@ -98,19 +98,6 @@ import {
         logger.debug('StrategyEngine', `${symbol}: Not bouncing yet`);
         return null;
       }
-  
-      // STEP 5: Order Flow Validation (if available)
-      const orderFlowConfirmation = this.orderFlowValidator.validate(
-        orderFlow,
-        trend.direction
-      );
-  
-      if (!orderFlowConfirmation.confirmed) {
-        logger.debug('StrategyEngine', `${symbol}: Order flow not confirmed`, {
-          score: orderFlowConfirmation.score
-        });
-        return null;
-      }
 
       const currentTimestamp = candles[candles.length - 1].timestamp;
       const session = SessionFilter.getSession(currentTimestamp);
@@ -124,7 +111,7 @@ import {
           trend,
           momentum,
           pullback,
-          orderFlow: orderFlowConfirmation,
+          orderFlow: undefined,
           regime,
           session,
         }

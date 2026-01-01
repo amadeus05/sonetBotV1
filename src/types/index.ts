@@ -14,6 +14,9 @@ export interface Candle {
   low: number;
   close: number;
   volume: number;
+
+  takerBuyBaseVolume: number;
+  openInterest: number;
 }
 
 export interface OrderFlowData {
@@ -31,8 +34,6 @@ export interface MarketData {
   candles: Candle[];
   orderFlow?: OrderFlowData;
   lastPrice: number;
-  volume24h: number;
-  priceChange24h: number;
 }
 
 // ============================================
@@ -73,6 +74,11 @@ export interface MomentumSignal {
   volumeRatio: number;    // Current volume / Average volume
   priceChange: number;    // % change
   direction: TrendDirection;
+    spikeReasons?: {        // <-- НОВОЕ ПОЛЕ
+    rsi: boolean;
+    volume: boolean;
+    price: boolean;
+  };
 }
 
 export interface PullbackAnalysis {

@@ -140,25 +140,11 @@ export class TradingBot {
         return;
       }
 
-      // 3. Fetch auxiliary data (Order Flow / Ticker) via REST
-      // Эти данные нужны для стратегии, но их сложно считать через сокет без полной истории
-      // Выполняем параллельно для скорости
-      const [ticker] = await Promise.all([
-        Helpers.retry(() => this.binance.get24hTicker(symbol), 3, 500) // 3 попытки, 500мс задержка
-          .catch((err) => {
-            // Если все попытки провалились, логируем и возвращаем значение по умолчанию
-            logger.warn('TradingBot', `Could not fetch ticker for ${symbol} after retries: ${err.message}`);
-            return { volume: '0', priceChangePercent: '0' };
-          }),
-      ]);
-
       // 4. Construct Market Data Object
       const marketData: MarketData = {
         symbol,
         candles, // Данные из памяти
         lastPrice: currentPrice, // Цена из памяти
-        volume24h: parseFloat(ticker.volume || '0'),
-        priceChange24h: parseFloat(ticker.priceChangePercent || '0')
       };
 
       // 5. Run Strategy Analysis

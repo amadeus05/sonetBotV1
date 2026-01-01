@@ -478,24 +478,6 @@ export class BinanceService {
   }
 
   /**
-   * Get complete market data for analysis
-   */
-  public async getMarketData(symbol: string): Promise<MarketData> {
-    const [candles, ticker] = await Promise.all([
-      this.getCandles(symbol),
-      this.get24hTicker(symbol)
-    ]);
-
-    return {
-      symbol,
-      candles,
-      lastPrice: parseFloat(ticker.lastPrice),
-      volume24h: parseFloat(ticker.volume),
-      priceChange24h: parseFloat(ticker.priceChangePercent)
-    };
-  }
-
-  /**
    * Test connectivity
    */
   public async testConnection(): Promise<boolean> {
