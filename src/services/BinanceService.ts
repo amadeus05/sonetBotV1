@@ -1,21 +1,19 @@
 /**
  * Binance Exchange Service
  * Responsibility: Handle all communication with Binance API
- * Supports both testnet and production
+ * PATCHED: quantity/price normalization, reduceOnly, recvWindow, safer positionRisk
  */
 
 import axios, { AxiosInstance } from 'axios';
 import * as crypto from 'crypto';
-import { 
-  Candle, 
-  MarketData, 
-  ExchangeOrder, 
+import {
+  Candle,
+  MarketData,
+  ExchangeOrder,
   ExchangeBalance
 } from '../types';
 import { config } from '../config/ConfigManager';
 import { logger } from './Logger';
-import { Helpers } from '../utils/Helpers';
-import WebSocket from 'ws';
 
 export class BinanceService {
   private apiKey: string;
@@ -25,22 +23,17 @@ export class BinanceService {
 
   // Cache for Step Sizes (e.g. BTCUSDT -> 0.001, 1000PEPEUSDT -> 1)
   private stepSizeCache: Record<string, number> = {};
+  private tickSizeCache: Record<string, number> = {};
 
-  // WebSocket Management
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
-  private reconnectDelay = 1000;
+  private readonly recvWindow = 5000;
 
   constructor() {
     const botConfig = config.getConfig();
-    
+
     this.apiKey = botConfig.apiKey;
     this.apiSecret = botConfig.apiSecret;
-    
-    // Use testnet or production
-    this.baseURL = botConfig.testnet 
-      ? 'https://testnet.binancefuture.com'
-      : 'https://fapi.binance.com';
+
+    this.baseURL = 'https://fapi.binance.com';
 
     this.client = axios.create({
       baseURL: this.baseURL,
@@ -50,21 +43,7 @@ export class BinanceService {
       }
     });
 
-    // Handle Rate Limits (429)
-    this.client.interceptors.response.use(
-      response => response,
-      async error => {
-        if (error.response?.status === 429) {
-          const retryAfter = parseInt(error.response.headers['retry-after'] || '60', 10);
-          logger.warn('BinanceService', `⚠️ API Rate limit hit (429). Sleeping for ${retryAfter}s...`);
-          await Helpers.sleep(retryAfter * 1000 + 1000);
-          return this.client.request(error.config);
-        }
-        return Promise.reject(error);
-      }
-    );
-
-    logger.info('BinanceService', `Initialized (${botConfig.testnet ? 'TESTNET' : 'PRODUCTION'})`);
+    logger.info('BinanceService', `Initialized (https://fapi.binance.com)`);
   }
 
   /**
@@ -78,95 +57,38 @@ export class BinanceService {
   }
 
   /**
-   * Подписка на стрим свечей
-   * callback будет вызываться при каждом обновлении свечи
+   * Normalize quantity according to symbol step size
    */
-  public subscribeToCandles(symbols: string[], timeframe: string, callback: (data: any) => void): WebSocket {
-    // Формируем список стримов
-    const streamNames = symbols.map(s => `${s.toLowerCase()}@kline_${timeframe}`).join('/');
-    
-    // 1. ОПРЕДЕЛЯЕМ ПРАВИЛЬНЫЙ БАЗОВЫЙ URL
-    // Для Testnet и Production адреса отличаются кардинально, replace тут ненадежен.
-    const isTestnet = this.baseURL.includes('testnet');
-    
-    let wsBaseUrl = '';
-    if (isTestnet) {
-        // Официальный адрес WS для Futures Testnet
-        wsBaseUrl = 'wss://stream.testnet.binancefuture.com';
-    } else {
-        // Официальный адрес WS для Futures Production
-        wsBaseUrl = 'wss://fstream.binance.com';
-    }
-
-    // 2. Собираем полный URL
-    const wsUrl = `${wsBaseUrl}/stream?streams=${streamNames}`;
-
-    logger.info('BinanceService', `Connecting to WebSocket: ${wsUrl}`); // Логируем полный URL для проверки
-    
-    const ws = new WebSocket(wsUrl);
-
-    ws.on('open', () => {
-      this.reconnectAttempts = 0;
-      logger.info('BinanceService', 'WebSocket connected ✅');
-    });
-
-    ws.on('message', (data: WebSocket.Data) => {
-      try {
-        const parsed = JSON.parse(data.toString());
-        // Формат: { stream: "...", data: { ... } }
-        // Иногда на connection приходит просто ping, его игнорируем, если нет data
-        if (parsed.data && parsed.data.e === 'kline') {
-          callback(parsed.data);
-        }
-      } catch (e) {
-        // Игнорируем ошибки парсинга (например, служебные сообщения)
-      }
-    });
-
-    ws.on('error', (err) => {
-      logger.error('BinanceService', 'WebSocket error', err.message);
-    });
-
-    ws.on('close', (code, reason) => {
-      if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-        logger.error('BinanceService', 'Max reconnect attempts reached. Stopping bot.');
-        process.exit(1);
-      }
-
-      const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts), 60000);
-      this.reconnectAttempts++;
-
-      logger.warn('BinanceService', `WebSocket disconnected (Code: ${code}). Reconnecting in ${delay}ms... (Attempt ${this.reconnectAttempts})`);
-      setTimeout(() => this.subscribeToCandles(symbols, timeframe, callback), delay);
-    });
-
-    // Пинг-понг для поддержания соединения (опционально, но полезно)
-    ws.on('ping', () => {
-        ws.pong();
-    });
-
-    return ws;
+  private normalizeQuantity(symbol: string, quantity: number): number {
+    const step = this.stepSizeCache[symbol] ?? 0.001;
+    return Math.floor(quantity / step) * step;
   }
 
   /**
-   * Load exchange info to cache symbol precisions (Lot Size)
+   * Normalize price according to symbol tick size
+   */
+  private normalizePrice(symbol: string, price: number): number {
+    const tick = this.tickSizeCache[symbol] ?? 0.01;
+    return Math.round(price / tick) * tick;
+  }
+
+  /**
+   * Load exchange info to cache symbol precisions (Lot Size & Tick Size)
    * MUST be called at bot startup
    */
   public async loadExchangeInfo(): Promise<void> {
     try {
       const response = await this.client.get('/fapi/v1/exchangeInfo');
-      
       const symbols = response.data.symbols;
       let count = 0;
-      
+
       for (const symbolData of symbols) {
-        // Find LOT_SIZE filter to get stepSize
-        const lotSizeFilter = symbolData.filters.find((f: any) => f.filterType === 'LOT_SIZE');
-        
-        if (lotSizeFilter) {
-          this.stepSizeCache[symbolData.symbol] = parseFloat(lotSizeFilter.stepSize);
-          count++;
-        }
+        const lotSize = symbolData.filters.find((f: any) => f.filterType === 'LOT_SIZE');
+        const priceFilter = symbolData.filters.find((f: any) => f.filterType === 'PRICE_FILTER');
+
+        if (lotSize) this.stepSizeCache[symbolData.symbol] = parseFloat(lotSize.stepSize);
+        if (priceFilter) this.tickSizeCache[symbolData.symbol] = parseFloat(priceFilter.tickSize);
+        count++;
       }
 
       logger.info('BinanceService', `Loaded exchange info for ${count} symbols`);
@@ -182,8 +104,8 @@ export class BinanceService {
   public getStepSize(symbol: string): number {
     const step = this.stepSizeCache[symbol];
     if (step === undefined) {
-        logger.warn('BinanceService', `Step size not found for ${symbol}, using default 0.001`);
-        return 0.001; 
+      logger.warn('BinanceService', `Step size not found for ${symbol}, using default 0.001`);
+      return 0.001;
     }
     return step;
   }
@@ -195,32 +117,19 @@ export class BinanceService {
   public async getPositionRisk(symbol: string): Promise<{ positionAmt: number; entryPrice: number; unrealizedProfit: number } | null> {
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&timestamp=${timestamp}`;
+      const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.get('/fapi/v2/positionRisk', {
-        params: { symbol, timestamp, signature }
+        params: { timestamp, recvWindow: this.recvWindow, signature }
       });
 
-      // API returns an array for the specific symbol
-      const data = response.data[0] || response.data;
-      
-      if (!data || typeof data.positionAmt === 'undefined') {
-        logger.warn('BinanceService', `Invalid position data for ${symbol}`);
-        return null;
-      }
+      const data = response.data.find((p: any) => p.symbol === symbol);
+      if (!data) return null;
 
-      const positionAmt = parseFloat(data.positionAmt);
-      const entryPrice = parseFloat(data.entryPrice);
-
-      if (isNaN(positionAmt) || isNaN(entryPrice)) {
-        logger.error('BinanceService', `Corrupted position data for ${symbol}`, data);
-        return null;
-      }
-      
       return {
-        positionAmt: positionAmt,
-        entryPrice: entryPrice,
+        positionAmt: parseFloat(data.positionAmt),
+        entryPrice: parseFloat(data.entryPrice),
         unrealizedProfit: parseFloat(data.unrealizedProfit)
       };
     } catch (error: any) {
@@ -241,7 +150,7 @@ export class BinanceService {
   ): Promise<Candle[]> {
     try {
       const params: any = { symbol, interval, limit };
-      
+
       if (startTime) params.startTime = startTime;
       if (endTime) params.endTime = endTime;
 
@@ -253,11 +162,37 @@ export class BinanceService {
         high: parseFloat(kline[2]),
         low: parseFloat(kline[3]),
         close: parseFloat(kline[4]),
-        volume: parseFloat(kline[5])
+        volume: parseFloat(kline[5]),
+        takerBuyBaseVolume: parseFloat(kline[9]),
+        openInterest: 0
       }));
     } catch (error: any) {
       logger.error('BinanceService', `Failed to fetch candles for ${symbol}`, error.message);
       throw error;
+    }
+  }
+
+  /**
+   * NEW: Get Historical Open Interest
+   * Note: Limit max is usually 500 for this endpoint
+   */
+  public async getHistoricalOpenInterest(
+    symbol: string,
+    period: string,
+    limit: number = 500,
+    startTime?: number,
+    endTime?: number
+  ): Promise<{ symbol: string; sumOpenInterest: string; sumOpenInterestValue: string; timestamp: number }[]> {
+    try {
+      const params: any = { symbol, period, limit };
+      if (startTime) params.startTime = startTime;
+      if (endTime) params.endTime = endTime;
+
+      const response = await this.client.get('/futures/data/openInterestHist', { params });
+      return response.data;
+    } catch (error: any) {
+      logger.warn('BinanceService', `Failed to fetch OI history for ${symbol}`, error.message);
+      return [];
     }
   }
 
@@ -315,11 +250,11 @@ export class BinanceService {
   public async getBalance(): Promise<ExchangeBalance[]> {
     try {
       const timestamp = Date.now();
-      const queryString = `timestamp=${timestamp}`;
+      const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.get('/fapi/v2/balance', {
-        params: { timestamp, signature }
+        params: { timestamp, recvWindow: this.recvWindow, signature }
       });
 
       return response.data.map((balance: any) => ({
@@ -340,11 +275,11 @@ export class BinanceService {
   public async getAccountInfo(): Promise<any> {
     try {
       const timestamp = Date.now();
-      const queryString = `timestamp=${timestamp}`;
+      const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.get('/fapi/v2/account', {
-        params: { timestamp, signature }
+        params: { timestamp, recvWindow: this.recvWindow, signature }
       });
 
       return response.data;
@@ -354,50 +289,17 @@ export class BinanceService {
     }
   }
 
-  public async getUserTrades(symbol: string, limit: number = 5): Promise<any[]> {
-    try {
-      const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&limit=${limit}&timestamp=${timestamp}`;
-      const signature = this.generateSignature(queryString);
-
-      const response = await this.client.get('/fapi/v1/userTrades', {
-        params: { symbol, limit, timestamp, signature }
-      });
-
-      if (!Array.isArray(response.data)) {
-        logger.warn('BinanceService', `Invalid user trades response for ${symbol}`);
-        return [];
-      }
-
-      return response.data
-        .map((t: any) => ({
-          id: t.id,
-          orderId: t.orderId,
-          price: parseFloat(t.price),
-          qty: parseFloat(t.qty),
-          realizedPnl: parseFloat(t.realizedPnl),
-          side: t.side,
-          time: t.time
-        }))
-        .filter(t => !isNaN(t.price) && !isNaN(t.qty));
-
-    } catch (error: any) {
-      logger.error('BinanceService', `Failed to fetch user trades for ${symbol}`, error.message);
-      return [];
-    }
-  }
-
   /**
    * Set leverage for symbol
    */
   public async setLeverage(symbol: string, leverage: number): Promise<void> {
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&leverage=${leverage}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&leverage=${leverage}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       await this.client.post('/fapi/v1/leverage', null, {
-        params: { symbol, leverage, timestamp, signature }
+        params: { symbol, leverage, timestamp, recvWindow: this.recvWindow, signature }
       });
 
       logger.info('BinanceService', `Set leverage to ${leverage}x for ${symbol}`);
@@ -416,23 +318,17 @@ export class BinanceService {
     quantity: number
   ): Promise<ExchangeOrder> {
     try {
+      const q = this.normalizeQuantity(symbol, quantity);
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=MARKET&quantity=${quantity}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=MARKET&quantity=${q}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
-        params: {
-          symbol,
-          side,
-          type: 'MARKET',
-          quantity,
-          timestamp,
-          signature
-        }
+        params: { symbol, side, type: 'MARKET', quantity: q, timestamp, recvWindow: this.recvWindow, signature }
       });
 
       logger.trade(symbol, `${side} MARKET order placed`, {
-        quantity,
+        quantity: q,
         orderId: response.data.orderId
       });
 
@@ -462,31 +358,25 @@ export class BinanceService {
     stopPrice: number
   ): Promise<ExchangeOrder> {
     try {
+      const q = this.normalizeQuantity(symbol, quantity);
+      const p = this.normalizePrice(symbol, stopPrice);
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&quantity=${quantity}&stopPrice=${stopPrice}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
-        params: {
-          symbol,
-          side,
-          type: 'STOP_MARKET',
-          quantity,
-          stopPrice,
-          timestamp,
-          signature
-        }
+        params: { symbol, side, type: 'STOP_MARKET', quantity: q, stopPrice: p, reduceOnly: true, timestamp, recvWindow: this.recvWindow, signature }
       });
 
-      logger.trade(symbol, `STOP LOSS order placed at ${stopPrice}`, { quantity });
+      logger.trade(symbol, `STOP LOSS order placed at ${p}`, { quantity: q });
 
       return {
         orderId: response.data.orderId.toString(),
         symbol: response.data.symbol,
         side,
         type: 'STOP_LOSS',
-        quantity,
-        stopPrice,
+        quantity: q,
+        stopPrice: p,
         status: response.data.status,
         timestamp: response.data.updateTime
       };
@@ -506,31 +396,25 @@ export class BinanceService {
     price: number
   ): Promise<ExchangeOrder> {
     try {
+      const q = this.normalizeQuantity(symbol, quantity);
+      const p = this.normalizePrice(symbol, price);
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&quantity=${quantity}&stopPrice=${price}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
-        params: {
-          symbol,
-          side,
-          type: 'TAKE_PROFIT_MARKET',
-          quantity,
-          stopPrice: price,
-          timestamp,
-          signature
-        }
+        params: { symbol, side, type: 'TAKE_PROFIT_MARKET', quantity: q, stopPrice: p, reduceOnly: true, timestamp, recvWindow: this.recvWindow, signature }
       });
 
-      logger.trade(symbol, `TAKE PROFIT order placed at ${price}`, { quantity });
+      logger.trade(symbol, `TAKE PROFIT order placed at ${p}`, { quantity: q });
 
       return {
         orderId: response.data.orderId.toString(),
         symbol: response.data.symbol,
         side,
         type: 'TAKE_PROFIT',
-        quantity,
-        price,
+        quantity: q,
+        price: p,
         status: response.data.status,
         timestamp: response.data.updateTime
       };
@@ -546,11 +430,11 @@ export class BinanceService {
   public async cancelOrder(symbol: string, orderId: string): Promise<void> {
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}`;
+      const queryString = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       await this.client.delete('/fapi/v1/order', {
-        params: { symbol, orderId, timestamp, signature }
+        params: { symbol, orderId, timestamp, recvWindow: this.recvWindow, signature }
       });
 
       logger.trade(symbol, `Order ${orderId} cancelled`);
@@ -566,12 +450,12 @@ export class BinanceService {
   public async getOpenOrders(symbol?: string): Promise<ExchangeOrder[]> {
     try {
       const timestamp = Date.now();
-      let queryString = `timestamp=${timestamp}`;
+      let queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       if (symbol) queryString = `symbol=${symbol}&${queryString}`;
-      
+
       const signature = this.generateSignature(queryString);
 
-      const params: any = { timestamp, signature };
+      const params: any = { timestamp, recvWindow: this.recvWindow, signature };
       if (symbol) params.symbol = symbol;
 
       const response = await this.client.get('/fapi/v1/openOrders', { params });
