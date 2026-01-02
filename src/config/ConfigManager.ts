@@ -76,14 +76,25 @@ export class ConfigManager {
       apiKey: process.env.BINANCE_API_KEY || '',
       apiSecret: process.env.BINANCE_API_SECRET || '',
       testnet: process.env.BINANCE_USE_TESTNET === 'true',
-      symbols: ['BTCUSDT', 'SOLUSDT', 'SUIUSDT', '1000PEPEUSDT', 'WIFUSDT', 'DOGEUSDT', 'TAOUSDT', 'FETUSDT', 'RENDERUSDT', 'NEARUSDT'],
-      // [
-      //   // 'AVAXUSDT', 'HBARUSDT', 'XLMUSDT', 'STRKUSDT', 'SEIUSDT',
-      //   'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT',
-      //   'DOGEUSDT', 
-      //   '1000PEPEUSDT', // <-- ИСПРАВЛЕНО
-      //   'WIFUSDT', 'SUIUSDT', 'NEARUSDT', 'FETUSDT', 'RENDERUSDT', 'TAOUSDT'
-      // ],
+      symbols: [
+        'BTCUSDT',
+        'BNBUSDT',
+        'ETHUSDT',
+        'SOLUSDT',
+        'ZECUSDT',
+        'XRPUSDT',
+        'DOGEUSDT',
+        'ADAUSDT',
+        'TRXUSDT',
+        'SUIUSDT',
+        'NEARUSDT',
+        'LINKUSDT',
+        'TAOUSDT',
+        'DOTUSDT',
+        'TONUSDT',
+        'AVAXUSDT',
+        'RENDERUSDT',
+      ],
       timeframe: '5m',
       strategy,
       risk
