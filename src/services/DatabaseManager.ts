@@ -5,7 +5,7 @@
 
 import Database from 'better-sqlite3';
 import * as path from 'path';
-import { Position, TradeResult, BacktestResult, PositionStatus } from '../types';
+import { Position, TradeResult, BacktestResult, PositionStatus, Candle } from '../types';
 import { logger } from './Logger';
 
 export class DatabaseManager {
@@ -150,6 +150,8 @@ export class DatabaseManager {
         low REAL NOT NULL,
         close REAL NOT NULL,
         volume REAL NOT NULL,
+        takerBuyBaseVolume REAL DEFAULT 0,
+        openInterest REAL DEFAULT 0,
         UNIQUE(symbol, timeframe, timestamp)
       )
     `);
@@ -368,17 +370,22 @@ export class DatabaseManager {
   /**
    * Save candles to local cache (INSERT OR IGNORE to avoid duplicates)
    */
-  public saveCandles(symbol: string, timeframe: string, candles: { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[]): void {
+  public saveCandles(symbol: string, timeframe: string, candles: Candle[]): void {
     if (candles.length === 0) return;
 
     const insert = this.db.prepare(`
-      INSERT OR IGNORE INTO historical_candles (symbol, timeframe, timestamp, open, high, low, close, volume)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO historical_candles 
+      (symbol, timeframe, timestamp, open, high, low, close, volume, takerBuyBaseVolume, openInterest)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    const insertMany = this.db.transaction((items: typeof candles) => {
+    const insertMany = this.db.transaction((items: Candle[]) => {
       for (const c of items) {
-        insert.run(symbol, timeframe, c.timestamp, c.open, c.high, c.low, c.close, c.volume);
+        insert.run(
+            symbol, timeframe, c.timestamp, 
+            c.open, c.high, c.low, c.close, c.volume, 
+            c.takerBuyBaseVolume || 0, c.openInterest || 0
+        );
       }
     });
 
@@ -389,9 +396,9 @@ export class DatabaseManager {
   /**
    * Get candles from local cache
    */
-  public getCandles(symbol: string, timeframe: string, startTime: number, endTime: number): { timestamp: number; open: number; high: number; low: number; close: number; volume: number }[] {
+  public getCandles(symbol: string, timeframe: string, startTime: number, endTime: number): Candle[] {
     const stmt = this.db.prepare(`
-      SELECT timestamp, open, high, low, close, volume
+      SELECT timestamp, open, high, low, close, volume, takerBuyBaseVolume, openInterest
       FROM historical_candles
       WHERE symbol = ? AND timeframe = ? AND timestamp >= ? AND timestamp <= ?
       ORDER BY timestamp ASC
@@ -404,7 +411,9 @@ export class DatabaseManager {
       high: r.high,
       low: r.low,
       close: r.close,
-      volume: r.volume
+      volume: r.volume,
+      takerBuyBaseVolume: r.takerBuyBaseVolume,
+      openInterest: r.openInterest
     }));
   }
 
