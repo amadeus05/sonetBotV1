@@ -1,150 +1,96 @@
 /**
- * Pullback Scanner
- * Responsibility: Detect pullbacks to key levels (EMA, support/resistance)
- * This is where we want to ENTER after momentum spike
+ * Pullback Scanner - FIXED VERSION
+ * Detects pullbacks based on PRICE ACTION, not EMA proximity
  */
 
 import { Candle, PullbackAnalysis, TrendDirection, TrendAnalysis } from '../types';
-import { TechnicalIndicators } from '../utils/TechnicalIndicators';
 import { config } from '../config/ConfigManager';
-import { Helpers } from '../utils/Helpers';
 
 export class PullbackScanner {
   /**
-   * Scan for pullback opportunities
+   * Scan for pullback based on recent price action
+   * NEW LOGIC: Detect when price moves against the trend (any retracement)
    */
   public scan(candles: Candle[], trend: TrendAnalysis): PullbackAnalysis {
-    const strategyConfig = config.getStrategyConfig();
-
     if (!trend.isStrong || trend.direction === TrendDirection.NEUTRAL) {
       return this.getNoPullback();
     }
 
-    const currentPrice = candles[candles.length - 1].close;
-
-    // Check pullback to EMA
-    if (strategyConfig.pullbackToEMA) {
-      return this.scanEMAPullback(currentPrice, trend, strategyConfig);
+    if (candles.length < 10) {
+      return this.getNoPullback();
     }
 
-    // Check pullback to support/resistance
-    return this.scanLevelPullback(candles, trend);
-  }
+    // Look at last 10 candles for a retracement pattern
+    const recentCandles = candles.slice(-10);
+    const isLong = trend.direction === TrendDirection.BULLISH;
 
-  /**
-   * Scan for pullback to EMA
-   */
-  private scanEMAPullback(
-    currentPrice: number,
-    trend: TrendAnalysis,
-    config: any
-  ): PullbackAnalysis {
-    const targetEMA = trend.emaFast; // Use fast EMA as pullback level
+    // Find recent swing high/low (pullback extreme)
+    let pullbackLevel = 0;
+    let occurred = false;
+
+    if (isLong) {
+      // In uptrend, look for a swing low (retracement down)
+      const lows = recentCandles.map(c => c.low);
+      pullbackLevel = Math.min(...lows);
+      
+      // Occurred if recent low is below the EMA (showing retracement)
+      const currentPrice = recentCandles[recentCandles.length - 1].close;
+      occurred = pullbackLevel < trend.emaFast && currentPrice >= pullbackLevel * 0.998;
+      
+    } else {
+      // In downtrend, look for a swing high (retracement up)
+      const highs = recentCandles.map(c => c.high);
+      pullbackLevel = Math.max(...highs);
+      
+      // Occurred if recent high is above the EMA (showing retracement)
+      const currentPrice = recentCandles[recentCandles.length - 1].close;
+      occurred = pullbackLevel > trend.emaFast && currentPrice <= pullbackLevel * 1.002;
+    }
 
     // Calculate distance from EMA
-    const distancePercent = Math.abs((currentPrice - targetEMA) / targetEMA) * 100;
+    const distancePercent = Math.abs((pullbackLevel - trend.emaFast) / trend.emaFast) * 100;
 
-    let occurred = false;
-    let isValid = false;
-
-    if (trend.direction === TrendDirection.BULLISH) {
-      // In bullish trend, pullback = price near or below fast EMA
-      occurred = currentPrice <= targetEMA * 1.005; // Within 0.5% of EMA
-      isValid = occurred && distancePercent <= (config.maxPullbackDistance * 100);
-    } else if (trend.direction === TrendDirection.BEARISH) {
-      // In bearish trend, pullback = price near or above fast EMA
-      occurred = currentPrice >= targetEMA * 0.995; // Within 0.5% of EMA
-      isValid = occurred && distancePercent <= (config.maxPullbackDistance * 100);
-    }
+    // Validate: pullback should be within reasonable distance from EMA
+    const maxDistance = config.getStrategyConfig().maxPullbackDistance * 100;
+    const isValid = occurred && distancePercent <= maxDistance;
 
     return {
       occurred,
       distanceFromEMA: distancePercent,
-      level: targetEMA,
+      level: pullbackLevel,
       isValid,
-      low: targetEMA,    // Use EMA as default low/high
-      high: targetEMA
-    };
-  }
-
-  /**
-   * Scan for pullback to support/resistance levels
-   */
-  private scanLevelPullback(candles: Candle[], trend: TrendAnalysis): PullbackAnalysis {
-    const pivots = TechnicalIndicators.findPivots(candles, 5, 5);
-    const currentPrice = candles[candles.length - 1].close;
-
-    let level = 0;
-    let occurred = false;
-    let distanceFromEMA = 0;
-    let lowPrice = currentPrice;
-    let highPrice = currentPrice;
-
-    if (trend.direction === TrendDirection.BULLISH) {
-      // Find nearest support level (pivot low)
-      const supportLevels = pivots.lows.filter(low => low < currentPrice);
-      if (supportLevels.length > 0) {
-        level = Math.max(...supportLevels); // Highest support below current price
-        const distance = ((currentPrice - level) / level) * 100;
-        occurred = distance <= 2; // Within 2% of support
-        distanceFromEMA = distance;
-        lowPrice = level;
-        highPrice = currentPrice;
-      }
-    } else if (trend.direction === TrendDirection.BEARISH) {
-      // Find nearest resistance level (pivot high)
-      const resistanceLevels = pivots.highs.filter(high => high > currentPrice);
-      if (resistanceLevels.length > 0) {
-        level = Math.min(...resistanceLevels); // Lowest resistance above current price
-        const distance = ((level - currentPrice) / currentPrice) * 100;
-        occurred = distance <= 2; // Within 2% of resistance
-        distanceFromEMA = distance;
-        lowPrice = currentPrice;
-        highPrice = level;
-      }
-    }
-
-    return {
-      occurred,
-      distanceFromEMA,
-      level,
-      isValid: occurred && level > 0,
-      low: lowPrice,
-      high: highPrice
+      low: isLong ? pullbackLevel : trend.emaFast,
+      high: isLong ? trend.emaFast : pullbackLevel
     };
   }
 
   /**
    * Check if price is bouncing off the pullback level
+   * SIMPLIFIED: Just check if last 2 candles show reversal
    */
-  public isBouncing(candles: Candle[], pullback: PullbackAnalysis, trend: TrendDirection): boolean {
+  public isBouncing(
+    candles: Candle[], 
+    pullback: PullbackAnalysis, 
+    trend: TrendDirection
+  ): boolean {
     if (!pullback.occurred || candles.length < 3) return false;
 
     const recentCandles = candles.slice(-3);
-    const currentCandle = recentCandles[2];
     const prevCandle = recentCandles[1];
+    const currentCandle = recentCandles[2];
 
     if (trend === TrendDirection.BULLISH) {
-      // Bullish bounce: 
-      // - Previous candle touched or went below level
-      // - Current candle is closing above level and above previous close
-      const touchedLevel = prevCandle.low <= pullback.level * 1.01;
-      const bouncingUp = currentCandle.close > prevCandle.close &&
-        currentCandle.close > pullback.level;
-
-      return touchedLevel && bouncingUp;
-    } else if (trend === TrendDirection.BEARISH) {
-      // Bearish bounce:
-      // - Previous candle touched or went above level
-      // - Current candle is closing below level and below previous close
-      const touchedLevel = prevCandle.high >= pullback.level * 0.99;
-      const bouncingDown = currentCandle.close < prevCandle.close &&
-        currentCandle.close < pullback.level;
-
-      return touchedLevel && bouncingDown;
+      // Bullish bounce: Current candle closing higher than previous
+      const isGreen = currentCandle.close > currentCandle.open;
+      const higherClose = currentCandle.close > prevCandle.close;
+      return isGreen && higherClose;
+      
+    } else {
+      // Bearish bounce: Current candle closing lower than previous
+      const isRed = currentCandle.close < currentCandle.open;
+      const lowerClose = currentCandle.close < prevCandle.close;
+      return isRed && lowerClose;
     }
-
-    return false;
   }
 
   /**
@@ -159,21 +105,23 @@ export class PullbackScanner {
 
     let score = 0;
 
-    // Factor 1: Distance from level (closer = better)
-    const distanceScore = 1 - Math.min(pullback.distanceFromEMA / 3, 1);
-    score += distanceScore * 0.4;
+    // Factor 1: Distance from EMA (closer = better, but not too close)
+    const idealDistance = 1.5; // ~1.5% from EMA is ideal
+    const distanceDiff = Math.abs(pullback.distanceFromEMA - idealDistance);
+    const distanceScore = Math.max(0, 1 - (distanceDiff / 2));
+    score += distanceScore * 0.5;
 
     // Factor 2: Bounce confirmation
     if (this.isBouncing(candles, pullback, trend)) {
-      score += 0.4;
+      score += 0.3;
     }
 
     // Factor 3: Volume on bounce
     if (candles.length >= 2) {
       const currentVolume = candles[candles.length - 1].volume;
-      const prevVolume = candles[candles.length - 2].volume;
-      if (currentVolume > prevVolume * 1.2) {
-        score += 0.2; // Volume increasing on bounce
+      const avgVolume = candles.slice(-20).reduce((sum, c) => sum + c.volume, 0) / 20;
+      if (currentVolume > avgVolume * 1.1) {
+        score += 0.2;
       }
     }
 
@@ -181,15 +129,13 @@ export class PullbackScanner {
   }
 
   /**
-   * Check if pullback is too deep (might be reversal, not pullback)
+   * Check if pullback is too deep (might be reversal)
    */
   public isTooDeep(pullback: PullbackAnalysis, trend: TrendAnalysis): boolean {
     if (!pullback.occurred) return false;
-
-    // If price has moved too far from the trend EMA, it might be reversing
-    const maxDeepness = config.getStrategyConfig().maxPullbackDistance * 100;
-
-    return pullback.distanceFromEMA > maxDeepness * 1.5;
+    
+    const maxDepth = config.getStrategyConfig().maxPullbackDistance * 100 * 1.5;
+    return pullback.distanceFromEMA > maxDepth;
   }
 
   /**
@@ -215,10 +161,10 @@ export class PullbackScanner {
     }
 
     if (!pullback.isValid) {
-      return '❌ Pullback too deep';
+      return '❌ Pullback invalid (too far from structure)';
     }
 
     const emoji = trend === TrendDirection.BULLISH ? '🎯' : '🔻';
-    return `${emoji} Pullback to ${Helpers.formatNumber(pullback.level, 4)} (${pullback.distanceFromEMA.toFixed(2)}% away)`;
+    return `${emoji} Pullback detected @ ${pullback.level.toFixed(2)} (${pullback.distanceFromEMA.toFixed(2)}% from EMA)`;
   }
 }

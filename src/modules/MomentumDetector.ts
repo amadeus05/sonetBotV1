@@ -106,17 +106,22 @@ export class MomentumDetector {
     // RSI extreme condition
     const rsiExtreme = rsi > config.rsiOverbought || rsi < config.rsiOversold;
 
-    // Volume spike condition
-    const volumeSpike = volumeRatio >= config.volumeSpikeMultiplier;
+    // Volume spike condition (relaxed to 1.5x)
+    const volumeSpike = volumeRatio >= 1.5;
 
-    // ИСПРАВЛЕНИЕ: Снижаем порог значимого движения с 2% до 0.3%
-    const significantMove = Math.abs(priceChange) >= 0.3; 
+    // Price movement (relaxed to 0.5% for 5m timeframe)
+    const significantMove = Math.abs(priceChange) >= 0.5;
 
-    // Momentum spike requires at least 1 condition (Relaxed mode)
-    // БЫЛО: const metConditions = conditions.filter(Boolean).length; return metConditions >= 2;
+    // NEW LOGIC: Accept spike if EITHER:
+    // 1. Strong volume (1.8x+) alone
+    // 2. OR volume (1.5x+) + price movement (0.5%+)
+    // 3. OR RSI extreme + volume spike
     
-    // СТАЛО: Достаточно хотя бы одного признака импульса
-    return rsiExtreme || volumeSpike || significantMove;
+    if (volumeRatio >= 1.8) return true; // Strong volume alone
+    if (volumeSpike && significantMove) return true; // Both present
+    if (rsiExtreme && volumeSpike) return true; // RSI + volume
+    
+    return false;
   }
 
   /**
@@ -127,17 +132,14 @@ export class MomentumDetector {
     priceChange: number,
     config: any
   ): TrendDirection {
-    // Strong bullish momentum
-    if (rsi > config.rsiOverbought || (rsi > 60 && priceChange > 2)) {
-      return TrendDirection.BULLISH;
-    }
+    // Price change is primary signal
+    if (priceChange > 0.5) return TrendDirection.BULLISH;
+    if (priceChange < -0.5) return TrendDirection.BEARISH;
+    
+    // RSI as secondary confirmation
+    if (rsi > 55) return TrendDirection.BULLISH;
+    if (rsi < 45) return TrendDirection.BEARISH;
 
-    // Strong bearish momentum
-    if (rsi < config.rsiOversold || (rsi < 40 && priceChange < -2)) {
-      return TrendDirection.BEARISH;
-    }
-
-    // Neutral momentum
     return TrendDirection.NEUTRAL;
   }
 
