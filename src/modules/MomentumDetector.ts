@@ -46,12 +46,24 @@ export class MomentumDetector {
       strategyConfig
     );
 
+    // Calculate high, low, atr for StrategyEngine momentum pullback
+    const recentCandles = candles.slice(-14);
+    const high = Math.max(...recentCandles.map(c => c.high));
+    const low = Math.min(...recentCandles.map(c => c.low));
+
+    // Calculate ATR
+    const atrValues = TechnicalIndicators.atr(candles, 14);
+    const atr = atrValues.length > 0 ? atrValues[atrValues.length - 1] : (high - low);
+
     return {
       hasSpike,
       rsi: currentRsi,
       volumeRatio,
       priceChange,
-      direction
+      direction,
+      high,
+      low,
+      atr
     };
   }
 
@@ -214,7 +226,10 @@ export class MomentumDetector {
       rsi: 50,
       volumeRatio: 1,
       priceChange: 0,
-      direction: TrendDirection.NEUTRAL
+      direction: TrendDirection.NEUTRAL,
+      high: 0,
+      low: 0,
+      atr: 0
     };
   }
 

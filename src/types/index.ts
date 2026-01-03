@@ -63,11 +63,15 @@ export interface MomentumSignal {
   volumeRatio: number;    // Current volume / Average volume
   priceChange: number;    // % change
   direction: TrendDirection;
-    spikeReasons?: {        // <-- НОВОЕ ПОЛЕ
+  spikeReasons?: {        // <-- НОВОЕ ПОЛЕ
     rsi: boolean;
     volume: boolean;
     price: boolean;
   };
+  // Fields for StrategyEngine momentum pullback
+  high: number;           // Impulse high price
+  low: number;            // Impulse low price  
+  atr: number;            // ATR at impulse detection
 }
 
 export interface PullbackAnalysis {
@@ -75,6 +79,9 @@ export interface PullbackAnalysis {
   distanceFromEMA: number;  // % distance
   level: number;             // Price level
   isValid: boolean;
+  // Fields for StrategyEngine
+  low: number;              // Pullback low price
+  high: number;             // Pullback high price
 }
 
 export enum MarketSession {
@@ -94,13 +101,7 @@ export interface TradingSignal {
   confidence: number;  // 0-1
   timestamp: number;
   tags: string[];
-  metadata: {
-    trend: TrendAnalysis;
-    momentum: MomentumSignal;
-    pullback: PullbackAnalysis;
-    regime: MarketRegime;
-    session: MarketSession;
-  };  
+  metadata: any;  // Can be legacy structure or MomentumSetup from StrategyEngine  
 }
 
 // ============================================

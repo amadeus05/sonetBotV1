@@ -30,4 +30,10 @@ export class SessionFilter {
     // Example: Prefer London and NY volatility
     return session === MarketSession.LONDON || session === MarketSession.NY;
   }
+
+  // Бонус: пересечение сессий (overlap) — самые сильные движения
+  static isOverlap(timestamp: number): boolean {
+    const hour = new Date(timestamp).getUTCHours();
+    return hour >= 13 && hour < 16; // 12:00–16:00 UTC = London + NY overlap — пик волатильности
+  }
 }

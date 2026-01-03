@@ -61,7 +61,9 @@ export class PullbackScanner {
       occurred,
       distanceFromEMA: distancePercent,
       level: targetEMA,
-      isValid
+      isValid,
+      low: targetEMA,    // Use EMA as default low/high
+      high: targetEMA
     };
   }
 
@@ -75,6 +77,8 @@ export class PullbackScanner {
     let level = 0;
     let occurred = false;
     let distanceFromEMA = 0;
+    let lowPrice = currentPrice;
+    let highPrice = currentPrice;
 
     if (trend.direction === TrendDirection.BULLISH) {
       // Find nearest support level (pivot low)
@@ -84,6 +88,8 @@ export class PullbackScanner {
         const distance = ((currentPrice - level) / level) * 100;
         occurred = distance <= 2; // Within 2% of support
         distanceFromEMA = distance;
+        lowPrice = level;
+        highPrice = currentPrice;
       }
     } else if (trend.direction === TrendDirection.BEARISH) {
       // Find nearest resistance level (pivot high)
@@ -93,6 +99,8 @@ export class PullbackScanner {
         const distance = ((level - currentPrice) / currentPrice) * 100;
         occurred = distance <= 2; // Within 2% of resistance
         distanceFromEMA = distance;
+        lowPrice = currentPrice;
+        highPrice = level;
       }
     }
 
@@ -100,7 +108,9 @@ export class PullbackScanner {
       occurred,
       distanceFromEMA,
       level,
-      isValid: occurred && level > 0
+      isValid: occurred && level > 0,
+      low: lowPrice,
+      high: highPrice
     };
   }
 
@@ -119,18 +129,18 @@ export class PullbackScanner {
       // - Previous candle touched or went below level
       // - Current candle is closing above level and above previous close
       const touchedLevel = prevCandle.low <= pullback.level * 1.01;
-      const bouncingUp = currentCandle.close > prevCandle.close && 
-                        currentCandle.close > pullback.level;
-      
+      const bouncingUp = currentCandle.close > prevCandle.close &&
+        currentCandle.close > pullback.level;
+
       return touchedLevel && bouncingUp;
     } else if (trend === TrendDirection.BEARISH) {
       // Bearish bounce:
       // - Previous candle touched or went above level
       // - Current candle is closing below level and below previous close
       const touchedLevel = prevCandle.high >= pullback.level * 0.99;
-      const bouncingDown = currentCandle.close < prevCandle.close && 
-                          currentCandle.close < pullback.level;
-      
+      const bouncingDown = currentCandle.close < prevCandle.close &&
+        currentCandle.close < pullback.level;
+
       return touchedLevel && bouncingDown;
     }
 
@@ -178,7 +188,7 @@ export class PullbackScanner {
 
     // If price has moved too far from the trend EMA, it might be reversing
     const maxDeepness = config.getStrategyConfig().maxPullbackDistance * 100;
-    
+
     return pullback.distanceFromEMA > maxDeepness * 1.5;
   }
 
@@ -190,7 +200,9 @@ export class PullbackScanner {
       occurred: false,
       distanceFromEMA: 100,
       level: 0,
-      isValid: false
+      isValid: false,
+      low: 0,
+      high: 0
     };
   }
 
