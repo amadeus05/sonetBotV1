@@ -69,7 +69,8 @@ export class ConfigManager {
       maxOpenTrades: parseInt(process.env.MAX_OPEN_TRADES || '2'),
       leverage: parseInt(process.env.LEVERAGE || '2'),
       maxDailyLoss: 0.05,      // 5% max daily loss
-      maxDrawdown: 0.15         // 15% max drawdown
+      maxDrawdown: 0.15,       // 15% max drawdown
+      minRR: parseFloat(process.env.MIN_RR || '1.5'),
     };
 
     return {

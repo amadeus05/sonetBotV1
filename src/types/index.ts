@@ -166,6 +166,7 @@ export interface RiskParameters {
   leverage: number;
   maxDailyLoss: number;      // % max loss per day
   maxDrawdown: number;       // % max drawdown
+  minRR: number;
 }
 
 export interface PositionSizeCalculation {

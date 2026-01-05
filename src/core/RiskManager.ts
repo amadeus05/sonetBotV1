@@ -334,7 +334,7 @@ export class RiskManager {
     // 8. Проверка коэффициента R:R
     const rr = Helpers.calculateRR(signal.entry, signal.stopLoss, signal.takeProfit, 
                                    signal.type === 'LONG');
-    const minRR = 1.5;
+    const minRR = config.getConfig().risk.minRR; // default 1.5 if good filtering than 1.2
 
     if (rr < minRR) {
       return { valid: false, reason: `R:R too low (${rr.toFixed(2)} < ${minRR})` };
