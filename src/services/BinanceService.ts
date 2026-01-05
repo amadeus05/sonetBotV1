@@ -1,11 +1,12 @@
 /**
  * Binance Exchange Service
  * Responsibility: Handle all communication with Binance API
- * PATCHED: quantity/price normalization, reduceOnly, recvWindow, safer positionRisk
+ * PATCHED: quantity/price normalization, reduceOnly, recvWindow, safer positionRisk, WebSocket Support
  */
 
 import axios, { AxiosInstance } from 'axios';
 import * as crypto from 'crypto';
+import WebSocket from 'ws';
 import {
   Candle,
   MarketData,
@@ -19,7 +20,10 @@ export class BinanceService {
   private apiKey: string;
   private apiSecret: string;
   private baseURL: string;
+  private wsBaseURL: string;
   private client: AxiosInstance;
+  private ws: WebSocket | null = null;
+  private pingInterval: NodeJS.Timeout | null = null;
 
   // Cache for Step Sizes (e.g. BTCUSDT -> 0.001, 1000PEPEUSDT -> 1)
   private stepSizeCache: Record<string, number> = {};
@@ -33,7 +37,13 @@ export class BinanceService {
     this.apiKey = botConfig.apiKey;
     this.apiSecret = botConfig.apiSecret;
 
-    this.baseURL = 'https://fapi.binance.com';
+    if (botConfig.testnet) {
+      this.baseURL = 'https://testnet.binancefuture.com';
+      this.wsBaseURL = 'wss://stream.binancefuture.com/ws';
+    } else {
+      this.baseURL = 'https://fapi.binance.com';
+      this.wsBaseURL = 'wss://fstream.binance.com/ws';
+    }
 
     this.client = axios.create({
       baseURL: this.baseURL,
@@ -43,7 +53,7 @@ export class BinanceService {
       }
     });
 
-    logger.info('BinanceService', `Initialized (https://fapi.binance.com)`);
+    logger.info('BinanceService', `Initialized (${this.baseURL})`);
   }
 
   /**
@@ -194,6 +204,84 @@ export class BinanceService {
       logger.warn('BinanceService', `Failed to fetch OI history for ${symbol}`, error.message);
       return [];
     }
+  }
+
+  /**
+   * Subscribe to Candle Streams (WebSocket)
+   */
+  public subscribeToCandles(
+    symbols: string[], 
+    interval: string, 
+    callback: (data: any) => void
+  ): void {
+    if (this.ws) {
+      this.ws.terminate();
+      this.stopPing();
+    }
+
+    const streams = symbols.map(s => `${s.toLowerCase()}@kline_${interval}`).join('/');
+    const url = `${this.wsBaseURL}/${streams}`;
+
+    logger.info('BinanceService', `🔌 Connecting to WebSocket: ${symbols.length} streams...`);
+
+    this.ws = new WebSocket(url);
+
+    this.ws.on('open', () => {
+      logger.info('BinanceService', '✅ WebSocket Connected');
+      this.startPing();
+    });
+
+    this.ws.on('message', (data: WebSocket.Data) => {
+      try {
+        const parsed = JSON.parse(data.toString());
+        // Handle combined stream payload structure: { stream: "...", data: {...} }
+        if (parsed.data && parsed.data.e === 'kline') {
+          callback(parsed.data);
+        }
+        // Handle single stream payload
+        else if (parsed.e === 'kline') {
+          callback(parsed);
+        }
+      } catch (err) {
+        logger.error('BinanceService', 'WS Parse Error', err);
+      }
+    });
+
+    this.ws.on('error', (err) => {
+      logger.error('BinanceService', 'WebSocket Error', err);
+    });
+
+    this.ws.on('close', () => {
+      logger.warn('BinanceService', '⚠️ WebSocket Closed. Reconnecting in 5s...');
+      this.stopPing();
+      setTimeout(() => {
+        this.subscribeToCandles(symbols, interval, callback);
+      }, 5000);
+    });
+  }
+
+  private startPing() {
+    this.pingInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.ping();
+      }
+    }, 30000);
+  }
+
+  private stopPing() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  public closeConnection(): void {
+    if (this.ws) {
+      logger.info('BinanceService', 'Closing WebSocket connection...');
+      this.ws.terminate();
+      this.ws = null;
+    }
+    this.stopPing();
   }
 
   /**

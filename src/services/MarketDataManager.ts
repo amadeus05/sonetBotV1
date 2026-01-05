@@ -13,6 +13,13 @@ export class MarketDataManager {
   
   // Cache storage
   private candlesCache: Map<string, Candle[]> = new Map();
+  // Buffer for startup synchronization
+  private initializationBuffer: Map<string, any[]> = new Map();
+  private isInitializing: boolean = false;
+  
+  // Prevent double refetching
+  private refetchingStates: Set<string> = new Set();
+  
   private tickerCache: Map<string, TickerCache> = new Map();
   
   private maxCandles = 1000;
@@ -22,24 +29,119 @@ export class MarketDataManager {
     this.binance = binance;
   }
 
+  /**
+   * Initialize Data Flow:
+   * 1. Subscribe to WS immediately (buffer data).
+   * 2. Fetch REST API history.
+   * 3. Merge history + buffered data.
+   * 4. Switch to real-time mode.
+   */
   public async initialize(symbols: string[], timeframe: string, onCandleClosed: (symbol: string) => void) {
-    logger.info('MarketData', '📥 Fetching historical snapshots...');
+    logger.info('MarketData', '🚀 Starting initialization sequence...');
     
-    // Sequential load to avoid rate limits at startup
+    this.isInitializing = true;
+    symbols.forEach(s => this.initializationBuffer.set(s, []));
+
+    // 1. Subscribe First (Start Buffering)
+    this.binance.subscribeToCandles(symbols, timeframe, (streamData) => {
+        const symbol = streamData.s;
+        
+        if (this.isInitializing) {
+            // Buffer data while history is loading
+            const buffer = this.initializationBuffer.get(symbol);
+            if (buffer) buffer.push(streamData);
+        } else {
+            // Process directly in real-time
+            this.handleStreamMessage(streamData, timeframe, onCandleClosed);
+        }
+    });
+
+    logger.info('MarketData', '📡 WebSocket subscribed. Buffering events...');
+    await Helpers.sleep(1000); // Allow WS connection to establish
+
+    // 2. Fetch History (Parallel-ish with delays)
+    logger.info('MarketData', '📥 Fetching historical snapshots via REST...');
+    
     for (const symbol of symbols) {
       try {
         const history = await this.binance.getCandles(symbol, timeframe, this.maxCandles);
-        this.candlesCache.set(symbol, history);
-        await Helpers.sleep(100); 
+        
+        // 3. Merge Buffer into History
+        this.mergeHistoryWithBuffer(symbol, history);
+        
+        logger.info('MarketData', `✅ ${symbol}: History loaded (${history.length}) + Buffer merged.`);
       } catch (e) {
         logger.error('MarketData', `Failed to load history for ${symbol}`, e);
       }
+      await Helpers.sleep(50); // Rate limit protection
     }
-    logger.info('MarketData', 'Snapshot loaded. Starting WebSocket...');
 
-    this.binance.subscribeToCandles(symbols, timeframe, (streamData) => {
-      this.handleStreamMessage(streamData, timeframe, onCandleClosed);
-    });
+    // 4. Switch to Real-Time
+    this.isInitializing = false;
+    this.initializationBuffer.clear();
+    
+    logger.info('MarketData', '🟢 Synchronization complete. Real-time mode active.');
+  }
+
+  /**
+   * Merge historical candles with buffered WS ticks
+   * FIXED: Sorting buffer & Dynamic Merge Pointer
+   */
+  private mergeHistoryWithBuffer(symbol: string, history: Candle[]) {
+    // 1. Sort buffer by timestamp to handle out-of-order WS packets
+    const buffer = (this.initializationBuffer.get(symbol) || []).sort((a, b) => a.k.t - b.k.t);
+    
+    if (history.length === 0) {
+        this.candlesCache.set(symbol, []);
+        return;
+    }
+
+    let merged = [...history];
+
+    // 2. Iterate buffer and compare against the *current* last candle in merged array
+    for (const streamData of buffer) {
+        const k = streamData.k;
+        const streamTime = k.t;
+        
+        // Dynamic check of the last element
+        const lastMerged = merged[merged.length - 1];
+
+        // Update if timestamps match (live candle update)
+        if (streamTime === lastMerged.timestamp) {
+            merged[merged.length - 1] = this.parseStreamCandle(k);
+        } 
+        // Append if newer (new interval started in buffer)
+        else if (streamTime > lastMerged.timestamp) {
+             merged.push(this.parseStreamCandle(k));
+        }
+        // If streamTime < lastMerged.timestamp, ignore (old data)
+    }
+
+    // Trim to max size
+    if (merged.length > this.maxCandles) {
+        merged = merged.slice(-this.maxCandles);
+    }
+
+    this.candlesCache.set(symbol, merged);
+  }
+
+  private parseStreamCandle(rawKline: any): Candle {
+      return {
+        timestamp: rawKline.t,
+        open: parseFloat(rawKline.o),
+        high: parseFloat(rawKline.h),
+        low: parseFloat(rawKline.l),
+        close: parseFloat(rawKline.c),
+        volume: parseFloat(rawKline.v),
+        takerBuyBaseVolume: parseFloat(rawKline.V) || 0, // Note uppercase V for taker volume in WS
+        openInterest: 0
+      };
+  }
+
+  public close(): void {
+    this.binance.closeConnection();
+    this.candlesCache.clear();
+    this.initializationBuffer.clear();
   }
 
   private getTimeframeMs(timeframe: string): number {
@@ -57,24 +159,16 @@ export class MarketDataManager {
   }
 
   /**
-   * FIX 5: Handle Stream Message with GAP DETECTION
+   * Handle Stream Message with Gap Detection & Double-Refetch Protection
    */
   private async handleStreamMessage(data: any, timeframe: string, onCandleClosed: (symbol: string) => void) {
     try {
       const rawKline = data.k;
       const symbol = data.s;
       const isClosed = rawKline.x;
-      const interval = rawKline.i;
+      // Use passed timeframe for consistency, not rawKline.i
 
-      const candle: Candle = {
-        timestamp: rawKline.t,
-        open: parseFloat(rawKline.o),
-        high: parseFloat(rawKline.h),
-        low: parseFloat(rawKline.l),
-        close: parseFloat(rawKline.c),
-        volume: parseFloat(rawKline.v)
-      };
-
+      const candle = this.parseStreamCandle(rawKline);
       const currentHistory = this.candlesCache.get(symbol) || [];
 
       if (currentHistory.length > 0) {
@@ -88,21 +182,31 @@ export class MarketDataManager {
           const expectedNext = lastCandle.timestamp + this.getTimeframeMs(timeframe);
           
           if (candle.timestamp > expectedNext) {
-             logger.warn('MarketData', `⚠️ GAP detected for ${symbol}! Missing data between ${lastCandle.timestamp} and ${candle.timestamp}. Refetching history...`);
+             
+             // Anti-Double Refetch Logic
+             if (this.refetchingStates.has(symbol)) {
+                 return; // Already fixing gap
+             }
+
+             logger.warn('MarketData', `⚠️ GAP detected for ${symbol}! Expected ${expectedNext}, got ${candle.timestamp}. Refetching history...`);
+             this.refetchingStates.add(symbol);
              
              // Refetch history to fix the gap
              try {
-                const fixedHistory = await this.binance.getCandles(symbol, interval, this.maxCandles);
+                // Use the timeframe passed to initialize to stay consistent
+                const fixedHistory = await this.binance.getCandles(symbol, timeframe, this.maxCandles);
                 this.candlesCache.set(symbol, fixedHistory);
                 
                 // If the new candle is closed, trigger the callback now with fixed data
                 if (isClosed) {
                     onCandleClosed(symbol);
                 }
-                return; // Skip appending the single stream candle since we refetched
              } catch (err) {
                  logger.error('MarketData', `Failed to refetch history for gap on ${symbol}`, err);
+             } finally {
+                 this.refetchingStates.delete(symbol);
              }
+             return; // Stop processing this specific tick
           }
 
           currentHistory.push(candle);
