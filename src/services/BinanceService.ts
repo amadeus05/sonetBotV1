@@ -1,7 +1,7 @@
 /**
  * Binance Exchange Service
  * Responsibility: Handle all communication with Binance API
- * PATCHED: quantity/price normalization, reduceOnly, recvWindow, safer positionRisk, WebSocket Support
+ * PATCHED: Added getUserTrades method to fix compilation errors
  */
 
 import axios, { AxiosInstance } from 'axios';
@@ -184,7 +184,6 @@ export class BinanceService {
 
   /**
    * NEW: Get Historical Open Interest
-   * Note: Limit max is usually 500 for this endpoint
    */
   public async getHistoricalOpenInterest(
     symbol: string,
@@ -202,6 +201,38 @@ export class BinanceService {
       return response.data;
     } catch (error: any) {
       logger.warn('BinanceService', `Failed to fetch OI history for ${symbol}`, error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Get User Trades (needed for TradeExecutor)
+   */
+  public async getUserTrades(symbol: string, limit: number = 50): Promise<any[]> {
+    try {
+      const timestamp = Date.now();
+      const queryString = `symbol=${symbol}&limit=${limit}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
+      const signature = this.generateSignature(queryString);
+
+      const response = await this.client.get('/fapi/v1/userTrades', {
+        params: { symbol, limit, timestamp, recvWindow: this.recvWindow, signature }
+      });
+
+      // Mapping data to ensure numbers are numbers
+      return response.data.map((t: any) => ({
+          id: t.id,
+          orderId: t.orderId,
+          symbol: t.symbol,
+          side: t.side,
+          price: parseFloat(t.price),
+          qty: parseFloat(t.qty),
+          realizedPnl: parseFloat(t.realizedPnl),
+          commission: parseFloat(t.commission),
+          time: t.time,
+          maker: t.maker
+      }));
+    } catch (error: any) {
+      logger.error('BinanceService', `Failed to fetch user trades for ${symbol}`, error.message);
       return [];
     }
   }
@@ -234,12 +265,9 @@ export class BinanceService {
     this.ws.on('message', (data: WebSocket.Data) => {
       try {
         const parsed = JSON.parse(data.toString());
-        // Handle combined stream payload structure: { stream: "...", data: {...} }
         if (parsed.data && parsed.data.e === 'kline') {
           callback(parsed.data);
-        }
-        // Handle single stream payload
-        else if (parsed.e === 'kline') {
+        } else if (parsed.e === 'kline') {
           callback(parsed);
         }
       } catch (err) {
