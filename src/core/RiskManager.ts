@@ -17,8 +17,8 @@ import { db } from '../services/DatabaseManager';
 import { logger } from '../services/Logger';
 import { Helpers } from '../utils/Helpers';
 
-const MAX_TOTAL_MARGIN_COMMITMENT_RATIO = 0.5; // Максимум 50% от текущей эквити может быть задействовано под начальную маржу.
-const MAX_TOTAL_RISK_EXPOSURE_RATIO = 0.06;    // Максимум 6% от баланса может быть под риском одновременно (суммарный риск).
+const MAX_TOTAL_MARGIN_COMMITMENT_RATIO = 0.8; // Максимум 50% от текущей эквити может быть задействовано под начальную маржу.
+const MAX_TOTAL_RISK_EXPOSURE_RATIO = 0.08;    // Максимум 6% от баланса может быть под риском одновременно (суммарный риск).
                                                // Если риск на сделку 1%, это позволит открыть макс 6 сделок.
                                                // Если риск на сделку 2%, это позволит открыть макс 3 сделки.
 
@@ -29,11 +29,26 @@ export class RiskManager {
   private dailyPnL: number = 0;
   private lastResetDate: string = '';
 
+  private backtestPositions: Position[] | null = null;
+
   constructor(initialBalance: number) {
     this.currentBalance = initialBalance;
     this.dailyStartBalance = initialBalance;
     this.peakBalance = initialBalance; // Инициализируем пик начальным балансом
     this.resetDailyPnL();
+  }
+
+  // 2. Метод для включения режима бэктеста
+  public setBacktestPositions(positions: Position[]): void {
+      this.backtestPositions = positions;
+  }
+
+  // 3. Изменяем логику получения позиций (приватный хелпер)
+  private getActivePositions(): Position[] {
+      if (this.backtestPositions) {
+          return this.backtestPositions; // Бэктест: быстро берем из памяти
+      }
+      return db.getOpenPositions(); // Лайв: берем из базы
   }
 
   /**
@@ -142,7 +157,7 @@ export class RiskManager {
    */
   public canOpenPosition(): boolean {
     const riskParams = config.getRiskConfig();
-    const openPositions = db.getOpenPositions();
+    const openPositions = this.getActivePositions(); 
 
     // Check max open trades
     if (openPositions.length >= riskParams.maxOpenTrades) {
