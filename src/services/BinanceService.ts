@@ -1,7 +1,7 @@
 /**
  * Binance Exchange Service
- * Responsibility: Handle all communication with Binance API
- * PATCHED: Added getUserTrades method to fix compilation errors
+ * Responsibility: Handle all communication with Binance API or Simulate it (Paper Trading)
+ * PATCHED: Added Paper Trading logic, WebSocket, getUserTrades
  */
 
 import axios, { AxiosInstance } from 'axios';
@@ -16,6 +16,26 @@ import {
 import { config } from '../config/ConfigManager';
 import { logger } from './Logger';
 
+// === TYPES FOR PAPER TRADING ===
+interface PaperPosition {
+  symbol: string;
+  amt: number;
+  entryPrice: number;
+  leverage: number;
+}
+
+interface PaperOrder {
+  orderId: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  type: string;
+  origQty: number;
+  price: number;
+  stopPrice: number;
+  status: string;
+  time: number;
+}
+
 export class BinanceService {
   private apiKey: string;
   private apiSecret: string;
@@ -24,6 +44,15 @@ export class BinanceService {
   private client: AxiosInstance;
   private ws: WebSocket | null = null;
   private pingInterval: NodeJS.Timeout | null = null;
+
+  // --- PAPER TRADING STATE ---
+  private isPaperTrading: boolean = false;
+  private paperState = {
+      balance: 1000, 
+      positions: new Map<string, PaperPosition>(),
+      orders: [] as PaperOrder[],
+      trades: [] as any[]
+  };
 
   // Cache for Step Sizes (e.g. BTCUSDT -> 0.001, 1000PEPEUSDT -> 1)
   private stepSizeCache: Record<string, number> = {};
@@ -36,6 +65,14 @@ export class BinanceService {
 
     this.apiKey = botConfig.apiKey;
     this.apiSecret = botConfig.apiSecret;
+
+    // Detect Paper Trading Mode
+    if (!this.apiKey || !this.apiSecret || this.apiKey.trim() === '') {
+        this.isPaperTrading = true;
+        this.paperState.balance = botConfig.risk.accountBalance || 1000;
+        logger.warn('BinanceService', '⚠️ API Keys missing. Switching to PAPER TRADING (SIMULATION) Mode.');
+        logger.info('BinanceService', `💰 Paper Balance: $${this.paperState.balance}`);
+    }
 
     if (botConfig.testnet) {
       this.baseURL = 'https://testnet.binancefuture.com';
@@ -52,6 +89,11 @@ export class BinanceService {
         'X-MBX-APIKEY': this.apiKey
       }
     });
+
+    // Remove auth header for paper mode
+    if (this.isPaperTrading) {
+        delete this.client.defaults.headers['X-MBX-APIKEY'];
+    }
 
     logger.info('BinanceService', `Initialized (${this.baseURL})`);
   }
@@ -121,10 +163,120 @@ export class BinanceService {
   }
 
   /**
+   * Helper for Paper Trading Execution
+   */
+  private async executePaperTrade(symbol: string, side: 'BUY' | 'SELL', qty: number, price: number, reason: string = 'MARKET') {
+    const cost = qty * price;
+    const fee = cost * 0.0005; // 0.05% taker fee simulation
+    
+    let pos = this.paperState.positions.get(symbol);
+    const isLong = side === 'BUY';
+    
+    // Update Balance (Fee)
+    this.paperState.balance -= fee;
+
+    // Log Trade for History
+    this.paperState.trades.push({
+        id: Date.now(),
+        orderId: `paper-${Date.now()}`,
+        symbol,
+        side,
+        price,
+        qty,
+        realizedPnl: 0,
+        time: Date.now(),
+        commission: fee,
+        maker: false
+    });
+
+    logger.info('PAPER', `📝 Executed ${side} ${symbol} @ ${price} (${reason})`);
+
+    if (!pos) {
+        // Open new position
+        this.paperState.positions.set(symbol, {
+            symbol,
+            amt: isLong ? qty : -qty,
+            entryPrice: price,
+            leverage: 1
+        });
+    } else {
+        // Closing or Reversing
+        if ((pos.amt > 0 && !isLong) || (pos.amt < 0 && isLong)) {
+            // Closing logic
+            const pnl = (price - pos.entryPrice) * qty * (pos.amt > 0 ? 1 : -1);
+            this.paperState.balance += pnl;
+            
+            // Update trade history PnL
+            this.paperState.trades[this.paperState.trades.length - 1].realizedPnl = pnl;
+
+            logger.info('PAPER', `💰 PnL Realized: ${pnl.toFixed(2)} USDT. New Balance: ${this.paperState.balance.toFixed(2)}`);
+
+            if (Math.abs(pos.amt) - qty <= 0.0000001) {
+                this.paperState.positions.delete(symbol);
+                this.paperState.orders = this.paperState.orders.filter(o => o.symbol !== symbol);
+            } else {
+                pos.amt = pos.amt > 0 ? pos.amt - qty : pos.amt + qty;
+            }
+        } else {
+            // Averaging
+            const totalCost = (Math.abs(pos.amt) * pos.entryPrice) + (qty * price);
+            const totalQty = Math.abs(pos.amt) + qty;
+            pos.entryPrice = totalCost / totalQty;
+            pos.amt = isLong ? totalQty : -totalQty;
+        }
+    }
+  }
+
+  /**
    * Get specific position risk (size, margin, etc.)
    * Used to verify if position is still open on exchange
    */
   public async getPositionRisk(symbol: string): Promise<{ positionAmt: number; entryPrice: number; unrealizedProfit: number } | null> {
+    // --- PAPER MODE ---
+    if (this.isPaperTrading) {
+      const pos = this.paperState.positions.get(symbol);
+      if (!pos) return { positionAmt: 0, entryPrice: 0, unrealizedProfit: 0 };
+
+      // SIMULATION: Check SL/TP triggers
+      const currentPrice = await this.getCurrentPrice(symbol);
+      const openOrders = this.paperState.orders.filter(o => o.symbol === symbol && o.status === 'NEW');
+
+      let positionClosed = false;
+
+      for (const order of openOrders) {
+          if (order.type === 'STOP_MARKET') {
+              const triggered = (pos.amt > 0 && currentPrice <= order.stopPrice) || (pos.amt < 0 && currentPrice >= order.stopPrice);
+              if (triggered) {
+                  await this.executePaperTrade(symbol, order.side, Math.abs(pos.amt), currentPrice, 'STOP_LOSS');
+                  positionClosed = true;
+                  break; 
+              }
+          }
+          else if (order.type === 'TAKE_PROFIT_MARKET') {
+              const triggered = (pos.amt > 0 && currentPrice >= order.stopPrice) || (pos.amt < 0 && currentPrice <= order.stopPrice);
+              if (triggered) {
+                  await this.executePaperTrade(symbol, order.side, Math.abs(pos.amt), currentPrice, 'TAKE_PROFIT');
+                  positionClosed = true;
+                  break;
+              }
+          }
+      }
+
+      if (positionClosed) {
+          return { positionAmt: 0, entryPrice: 0, unrealizedProfit: 0 };
+      }
+
+      const sideMultiplier = pos.amt > 0 ? 1 : -1;
+      const pnl = (currentPrice - pos.entryPrice) * Math.abs(pos.amt) * sideMultiplier;
+
+      return {
+          positionAmt: pos.amt,
+          entryPrice: pos.entryPrice,
+          unrealizedProfit: pnl
+      };
+    }
+
+    // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
       const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
@@ -209,6 +361,15 @@ export class BinanceService {
    * Get User Trades (needed for TradeExecutor)
    */
   public async getUserTrades(symbol: string, limit: number = 50): Promise<any[]> {
+    // --- PAPER MODE ---
+    if (this.isPaperTrading) {
+      return this.paperState.trades
+          .filter(t => t.symbol === symbol)
+          .sort((a, b) => b.time - a.time)
+          .slice(0, limit);
+    }
+
+    // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&limit=${limit}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
@@ -218,7 +379,6 @@ export class BinanceService {
         params: { symbol, limit, timestamp, recvWindow: this.recvWindow, signature }
       });
 
-      // Mapping data to ensure numbers are numbers
       return response.data.map((t: any) => ({
           id: t.id,
           orderId: t.orderId,
@@ -364,6 +524,17 @@ export class BinanceService {
    * Get account balance
    */
   public async getBalance(): Promise<ExchangeBalance[]> {
+    // --- PAPER MODE ---
+    if (this.isPaperTrading) {
+      return [{
+          asset: 'USDT',
+          free: this.paperState.balance,
+          locked: 0,
+          total: this.paperState.balance
+      }];
+    }
+
+    // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
       const queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
@@ -409,6 +580,8 @@ export class BinanceService {
    * Set leverage for symbol
    */
   public async setLeverage(symbol: string, leverage: number): Promise<void> {
+    if (this.isPaperTrading) return;
+
     try {
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&leverage=${leverage}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
@@ -433,8 +606,27 @@ export class BinanceService {
     side: 'BUY' | 'SELL',
     quantity: number
   ): Promise<ExchangeOrder> {
+    const q = this.normalizeQuantity(symbol, quantity);
+
+    // --- PAPER MODE ---
+    if (this.isPaperTrading) {
+      const price = await this.getCurrentPrice(symbol);
+      await this.executePaperTrade(symbol, side, q, price, 'ENTRY');
+      
+      return {
+          orderId: `paper-${Date.now()}`,
+          symbol,
+          side,
+          type: 'MARKET',
+          quantity: q,
+          price: price,
+          status: 'FILLED',
+          timestamp: Date.now()
+      };
+    }
+
+    // --- LIVE MODE ---
     try {
-      const q = this.normalizeQuantity(symbol, quantity);
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&side=${side}&type=MARKET&quantity=${q}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
@@ -473,9 +665,24 @@ export class BinanceService {
     quantity: number,
     stopPrice: number
   ): Promise<ExchangeOrder> {
+    const q = this.normalizeQuantity(symbol, quantity);
+    const p = this.normalizePrice(symbol, stopPrice);
+
+    // --- PAPER MODE ---
+    if (this.isPaperTrading) {
+      const order: PaperOrder = {
+          orderId: `paper-sl-${Date.now()}`,
+          symbol, side, type: 'STOP_MARKET',
+          origQty: q, price: 0, stopPrice: p,
+          status: 'NEW', time: Date.now()
+      };
+      this.paperState.orders.push(order);
+      logger.info('PAPER', `🛡️ STOP LOSS placed @ ${p}`);
+      return { ...order, quantity: q } as any;
+    }
+
+    // --- LIVE MODE ---
     try {
-      const q = this.normalizeQuantity(symbol, quantity);
-      const p = this.normalizePrice(symbol, stopPrice);
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
@@ -511,9 +718,24 @@ export class BinanceService {
     quantity: number,
     price: number
   ): Promise<ExchangeOrder> {
+    const q = this.normalizeQuantity(symbol, quantity);
+    const p = this.normalizePrice(symbol, price);
+
+    // --- PAPER MODE ---
+    if (this.isPaperTrading) {
+      const order: PaperOrder = {
+          orderId: `paper-tp-${Date.now()}`,
+          symbol, side, type: 'TAKE_PROFIT_MARKET',
+          origQty: q, price: 0, stopPrice: p,
+          status: 'NEW', time: Date.now()
+      };
+      this.paperState.orders.push(order);
+      logger.info('PAPER', `💎 TAKE PROFIT placed @ ${p}`);
+      return { ...order, quantity: q } as any;
+    }
+
+    // --- LIVE MODE ---
     try {
-      const q = this.normalizeQuantity(symbol, quantity);
-      const p = this.normalizePrice(symbol, price);
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
@@ -544,6 +766,14 @@ export class BinanceService {
    * Cancel order
    */
   public async cancelOrder(symbol: string, orderId: string): Promise<void> {
+    // --- PAPER MODE ---
+    if (this.isPaperTrading) {
+      this.paperState.orders = this.paperState.orders.filter(o => o.orderId !== orderId);
+      logger.info('PAPER', `Cancelled order ${orderId}`);
+      return;
+    }
+
+    // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
@@ -564,6 +794,26 @@ export class BinanceService {
    * Get all open orders
    */
   public async getOpenOrders(symbol?: string): Promise<ExchangeOrder[]> {
+    // --- PAPER MODE ---
+    if (this.isPaperTrading) {
+      const orders = symbol 
+          ? this.paperState.orders.filter(o => o.symbol === symbol) 
+          : this.paperState.orders;
+          
+      return orders.map(o => ({
+          orderId: o.orderId,
+          symbol: o.symbol,
+          side: o.side as 'BUY' | 'SELL',
+          type: 'LIMIT',
+          quantity: o.origQty,
+          price: o.price,
+          stopPrice: o.stopPrice,
+          status: 'NEW',
+          timestamp: o.time
+      }));
+    }
+
+    // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
       let queryString = `timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
