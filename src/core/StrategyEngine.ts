@@ -289,67 +289,82 @@ export class StrategyEngine {
   // SIGNAL GENERATION
   // =========================
 
-private generateSignal(
-  symbol: string,
-  candles: Candle[],
-  setup: MomentumSetup
-): TradingSignal {
-  const isLong = setup.direction === TrendDirection.BULLISH;
+  private generateSignal(
+    symbol: string,
+    candles: Candle[],
+    setup: MomentumSetup
+  ): TradingSignal {
+    const isLong = setup.direction === TrendDirection.BULLISH;
 
-  const entry = isLong
-    ? setup.pullbackHigh! + this.getTickSize(symbol)
-    : setup.pullbackLow! - this.getTickSize(symbol);
+    const entry = isLong
+      ? setup.pullbackHigh! + this.getTickSize(symbol)
+      : setup.pullbackLow! - this.getTickSize(symbol);
 
-  // FIXED: Use 3x ATR instead of 2x for more breathing room
-  // Also add a minimum distance based on the impulse range
-  const impulseRange = setup.impulseHigh - setup.impulseLow;
-  const atrBuffer = setup.impulseATR * 3; // Changed from 2 to 3
-  const minBuffer = impulseRange * 0.15; // At least 15% of impulse range
-  
-  const buffer = Math.max(atrBuffer, minBuffer);
+    const impulseRange = setup.impulseHigh - setup.impulseLow;
+    
+    // SL: ATR * 2.5 (чуть плотнее, чем 3)
+    const atrBuffer = setup.impulseATR * 2.5; 
+    const minBuffer = impulseRange * 0.15;
+    const buffer = Math.max(atrBuffer, minBuffer);
 
-  const stopLoss = isLong
-    ? setup.pullbackLow! - buffer
-    : setup.pullbackHigh! + buffer;
+    const stopLoss = isLong
+      ? setup.pullbackLow! - buffer
+      : setup.pullbackHigh! + buffer;
 
-  // Keep the 1.5x R:R for take profit
-  const takeProfit = isLong
-    ? entry + impulseRange * 1.5
-    : entry - impulseRange * 1.5;
+    const takeProfit = isLong
+      ? entry + impulseRange * 1.5
+      : entry - impulseRange * 1.5;
 
-  const confidence = Math.min(
-    0.4 +
-    Math.min(setup.impulseVolumeRatio * 0.2, 0.3) +
-    Math.min((impulseRange / setup.impulseATR) * 0.2, 0.3),
-    1
-  );
+    // --- ИСПРАВЛЕННЫЙ РАСЧЕТ CONFIDENCE ---
+    // 1. База 50%
+    let score = 0.5;
 
-  const signal: TradingSignal = {
-    symbol,
-    type: isLong ? SignalType.LONG : SignalType.SHORT,
-    entry,
-    stopLoss,
-    takeProfit,
-    positionSize: 0,
-    confidence,
-    timestamp: Date.now(),
-    tags: [
-      'momentum_pullback',
-      `pb:${Math.round(setup.pullbackDepth! * 100)}%`,
-      `bars:${setup.barsSinceImpulse}`
-    ],
-    metadata: setup
-  };
+    // 2. Бонус за Объем (Max 0.2)
+    // Чтобы получить +0.2, объем должен быть x3 от среднего. x1.5 даст +0.05
+    const volScore = Math.max(0, (setup.impulseVolumeRatio - 1.5) * 0.13);
+    score += Math.min(volScore, 0.2);
 
-  this.info(symbol, '📋 GENERATED SIGNAL', signal);
+    // 3. Бонус за Силу Импульса (Max 0.2)
+    // Отношение Тела к ATR. Если свеча в 3 раза больше ATR -> бонус
+    const momentumScore = (impulseRange / setup.impulseATR) * 0.05;
+    score += Math.min(momentumScore, 0.2);
 
-  const sizing = this.riskManager.calculatePositionSize(signal, candles);
+    // 4. Бонус за качество отката (Max 0.1)
+    // Чем ближе к EMA, тем лучше. setup.pullbackDepth это decimal (0.01 = 1%)
+    // Если откат был в пределах 0.5% от EMA -> +0.1
+    const depth = setup.pullbackDepth || 0.05; 
+    if (depth < 0.005) score += 0.1;       // < 0.5% dist
+    else if (depth < 0.01) score += 0.05;  // < 1.0% dist
 
-  return {
-    ...signal,
-    positionSize: sizing.size
-  };
-}
+    const confidence = Math.min(score, 1.0);
+    // -------------------------------------
+
+    const signal: TradingSignal = {
+      symbol,
+      type: isLong ? SignalType.LONG : SignalType.SHORT,
+      entry,
+      stopLoss,
+      takeProfit,
+      positionSize: 0,
+      confidence, // Теперь будет варьироваться от 0.6 до 1.0
+      timestamp: Date.now(),
+      tags: [
+        'momentum_pullback',
+        `pb:${(depth * 100).toFixed(2)}%`,
+        `bars:${setup.barsSinceImpulse}`
+      ],
+      metadata: setup
+    };
+
+    this.info(symbol, '📋 GENERATED SIGNAL', signal);
+
+    const sizing = this.riskManager.calculatePositionSize(signal, candles);
+
+    return {
+      ...signal,
+      positionSize: sizing.size
+    };
+  }
 
   // =========================
   // HELPERS
