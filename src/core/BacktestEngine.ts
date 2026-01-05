@@ -30,6 +30,11 @@ const BINANCE_TAKER_FEE = 0.0005; // 0.05%
 const SLIPPAGE_PERCENT = 0.0002;  // 0.02%
 const STRATEGY_LOOKBACK = 1000;   // History window
 
+// === ANTI-COMPOUND MODE ===
+// Set to true for realistic backtests (fixed position sizing based on initial balance)
+// Set to false for compound growth (position sizing based on current equity)
+const FIXED_POSITION_SIZE_MODE = true;
+
 export class BacktestEngine {
     private binance: BinanceService;
     private walletBalance: number = 0;
@@ -40,6 +45,7 @@ export class BacktestEngine {
     private equityCurve: { timestamp: number; balance: number, equity: number }[] = [];
     private totalFeesPaid: number = 0;
     private maxRiskExposureRatio = 0.06;
+    private initialBalance: number = 0; // For fixed position sizing mode
 
     constructor() {
         this.binance = new BinanceService();
@@ -52,9 +58,12 @@ export class BacktestEngine {
         });
 
         // 1. Initialize Account
+        this.initialBalance = backtestConfig.initialBalance;
         this.walletBalance = backtestConfig.initialBalance;
         this.freeBalance = backtestConfig.initialBalance;
         this.lockedMargin = 0;
+
+        logger.info('Backtest', `Position sizing mode: ${FIXED_POSITION_SIZE_MODE ? 'FIXED (realistic)' : 'COMPOUND (growth)'}`);
 
         this.closedTrades = [];
         this.activePositions = [];
@@ -67,6 +76,7 @@ export class BacktestEngine {
         }];
 
         const riskManager = new RiskManager(backtestConfig.initialBalance);
+        riskManager.setBacktestPositions(this.activePositions);
         const strategyEngine = new StrategyEngine(riskManager);
 
         // 2. Load Data
@@ -112,7 +122,9 @@ export class BacktestEngine {
                 process.stdout.write(`\r[${percent}%] Eq: $${currentEquity.toFixed(0)} | Free: $${this.freeBalance.toFixed(0)} | Pos: ${this.activePositions.length}  `);
             }
 
-            (riskManager as any).currentBalance = currentEquity;
+            // === CRITICAL: Use initial balance in FIXED mode to prevent unrealistic compound growth ===
+            const balanceForSizing = FIXED_POSITION_SIZE_MODE ? this.initialBalance : currentEquity;
+            (riskManager as any).currentBalance = balanceForSizing;
 
             // A. Check Exits
             for (let j = this.activePositions.length - 1; j >= 0; j--) {
@@ -399,7 +411,7 @@ export class BacktestEngine {
         return data;
     }
 
-private async fetchHistoricalData(symbol: string, startDate: Date, endDate: Date): Promise<Candle[]> {
+    private async fetchHistoricalData(symbol: string, startDate: Date, endDate: Date): Promise<Candle[]> {
         const timeframe = config.getConfig().timeframe;
         const startTime = startDate.getTime();
         const endTime = endDate.getTime();
@@ -436,11 +448,7 @@ private async fetchHistoricalData(symbol: string, startDate: Date, endDate: Date
             const candles = await this.binance.getCandles(symbol, timeframe, klineLimit, currentTime);
             if (candles.length === 0) break;
 
-            const mergedCandles = candles.map(c => ({ 
-                ...c, 
-                openInterest: 0, 
-                takerBuyBaseVolume: c.takerBuyBaseVolume || 0 
-            }));
+            const mergedCandles = candles.map(c => ({ ...c }));
 
             const filtered = mergedCandles.filter(c => c.timestamp >= startTime && c.timestamp <= endTime);
             allCandles.push(...filtered);
