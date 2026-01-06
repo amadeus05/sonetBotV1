@@ -2,14 +2,27 @@
  * Main Entry Point
  * Start the trading bot here
  */
-
+import express from 'express';
+import type { Request, Response } from 'express';
 import { TradingBot } from './core/TradingBot';
 import { logger } from './services/Logger';
 import * as readline from 'readline';
 
+const server = express();
+server.use(express.json());
+const PORT: number = Number(process.env.PORT) || 8000; // Render требует переменную PORT
+
 // Handle unhandled rejections
 process.on('unhandledRejection', (reason, promise) => {
   logger.error('Process', 'Unhandled Rejection', { reason, promise });
+});
+
+server.get('/health', (_req: Request, res: Response) => {
+  res.status(200).send('Algo Trading Bot is alive!');
+});
+
+server.get('/', (_req: Request, res: Response) => {
+  res.send('<h1>Algo Trading Bot is alive!</h1><p>/health — <- check health <3 </p>');
 });
 
 // Handle uncaught exceptions
@@ -32,6 +45,10 @@ async function main() {
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
+
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Express server listening on port ${PORT}`);
+  });
 
   const bot = new TradingBot();
 
