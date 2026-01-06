@@ -44,7 +44,8 @@ export class BacktestEngine {
     private closedTrades: TradeResult[] = [];
     private equityCurve: { timestamp: number; balance: number, equity: number }[] = [];
     private totalFeesPaid: number = 0;
-    private maxRiskExposureRatio = 0.06;
+    // Синхронизируем с RiskManager (MAX_TOTAL_RISK_EXPOSURE_RATIO = 0.08)
+    private maxRiskExposureRatio = 0.08;
     private initialBalance: number = 0; // For fixed position sizing mode
 
     constructor() {

@@ -286,7 +286,9 @@ export class RiskManager {
     const marginRequiredForNewTrade = notionalSize / riskParams.leverage;
 
     // 3. Расчет общей маржи и ОБЩЕГО РИСКА открытых позиций
-    const openPositions = db.getOpenPositions();
+    // Важно: в бэктесте позиции находятся в памяти, а не в БД.
+    // Поэтому берём их через единый хелпер.
+    const openPositions = this.getActivePositions();
     let totalMarginCurrentlyUsed = 0;
     let totalRiskCurrentlyExposed = 0;
 

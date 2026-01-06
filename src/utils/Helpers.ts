@@ -157,8 +157,14 @@ export class Helpers {
     leverage: number = 1
   ): { pnl: number; pnlPercent: number } {
     const priceDiff = isLong ? (exit - entry) : (entry - exit);
-    const pnl = (priceDiff / entry) * size * leverage;
-    const pnlPercent = (priceDiff / entry) * 100 * leverage;
+    /**
+     * ВАЖНО:
+     * `size` в проекте — это NOTIONAL (номинал позиции в USDT), а не маржа.
+     * Для фьючерсов PnL в USDT считается от notional и НЕ умножается на плечо.
+     * Плечо влияет на маржу (size/leverage) и на доходность в % относительно маржи.
+     */
+    const pnl = (priceDiff / entry) * size;
+    const pnlPercent = (priceDiff / entry) * 100 * leverage; // % доходности на маржу (ROI)
 
     return { pnl, pnlPercent };
   }
