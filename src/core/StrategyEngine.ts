@@ -255,10 +255,9 @@ export class StrategyEngine {
       : entry - targetDist;
 
     // --- CONFIDENCE ---
-    let score = 0.8; // Базовая уверенность выше, так как мы прошли строгие фильтры
-    if (setup.impulseVolumeRatio > 2.0) score += 0.1;
-    if (setup.barsSinceImpulse < 15) score += 0.1;
-    const confidence = Math.min(score, 1.0);
+    // Confidence is a "setup quality score" (0..1), not a probability of winning.
+    // Goal: meaningful spread (not a near-constant 0.8-1.0).
+    const confidence = this.calculateConfidence(candles, setup);
 
     const signal: TradingSignal = {
       symbol,
@@ -284,6 +283,59 @@ export class StrategyEngine {
   // =========================
   // HELPERS
   // =========================
+
+  private calculateConfidence(candles: Candle[], setup: MomentumSetup): number {
+    const last = candles[candles.length - 1];
+    const prev = candles.length >= 2 ? candles[candles.length - 2] : last;
+
+    const clamp01 = (v: number) => Math.max(0, Math.min(v, 1));
+
+    // 1) Volume quality (1.0x..3.0x mapped to 0..1)
+    const volumeScore = clamp01((setup.impulseVolumeRatio - 1.0) / 2.0);
+
+    // 2) Recency: fresher impulse is better (0..50 bars)
+    const recencyScore = clamp01(1 - (setup.barsSinceImpulse / 50));
+
+    // 3) Pullback depth around "ideal" ~0.5 fib within [0.3..0.7]
+    let fibScore = 0.5;
+    if (setup.pullback) {
+      const impulseRange = setup.impulseHigh - setup.impulseLow;
+      if (Number.isFinite(impulseRange) && impulseRange > 0) {
+        const isLong = setup.direction === TrendDirection.BULLISH;
+        const pullbackDist = isLong
+          ? (setup.impulseHigh - setup.pullback.level)
+          : (setup.pullback.level - setup.impulseLow);
+        const fib = pullbackDist / impulseRange; // expected 0.3..0.7 by filter
+        // Peak at 0.5, drops to 0 at +/-0.2
+        fibScore = clamp01(1 - (Math.abs(fib - 0.5) / 0.2));
+      }
+    }
+
+    // 4) Pullback distance from EMA: smaller is better (heuristic; 1.5% -> 0)
+    let pullbackDistanceScore = 0.5;
+    if (setup.pullback && Number.isFinite(setup.pullback.distanceFromEMA)) {
+      pullbackDistanceScore = clamp01(1 - (setup.pullback.distanceFromEMA / 1.5));
+    }
+
+    // 5) Bounce "strength" (simple): last candle continuation in trend direction
+    const isLong = setup.direction === TrendDirection.BULLISH;
+    const bounceScore = clamp01(
+      isLong
+        ? (last.close > last.open ? 0.7 : 0.3) + (last.close > prev.close ? 0.3 : 0)
+        : (last.close < last.open ? 0.7 : 0.3) + (last.close < prev.close ? 0.3 : 0)
+    );
+
+    // Weighted blend
+    const score =
+      volumeScore * 0.20 +
+      recencyScore * 0.20 +
+      fibScore * 0.25 +
+      pullbackDistanceScore * 0.20 +
+      bounceScore * 0.15;
+
+    // Keep within reasonable bounds for sizing logic; reject signals elsewhere if too low
+    return clamp01(score);
+  }
 
   private resetSetup(symbol: string): void {
       this.setups.set(symbol, { 
