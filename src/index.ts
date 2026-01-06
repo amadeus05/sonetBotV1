@@ -5,7 +5,6 @@
 
 import { TradingBot } from './core/TradingBot';
 import { logger } from './services/Logger';
-import * as readline from 'readline';
 
 // Handle unhandled rejections
 process.on('unhandledRejection', (reason, promise) => {
@@ -48,110 +47,10 @@ async function main() {
   // Start bot
   try {
     await bot.start();
-
-    // Setup command interface
-    setupCommandInterface(bot);
-
   } catch (error: any) {
     logger.error('Main', 'Failed to start bot', error.message);
     process.exit(1);
   }
-}
-
-/**
- * Setup interactive command interface
- */
-function setupCommandInterface(bot: TradingBot) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: '\n> '
-  });
-
-  console.log('\n📝 Available commands:');
-  console.log('   status    - Show bot status');
-  console.log('   stats     - Show performance stats');
-  console.log('   stop      - Stop the bot');
-  console.log('   emergency - Emergency stop (close all positions)');
-  console.log('   help      - Show this help\n');
-
-  rl.prompt();
-
-  rl.on('line', async (input: string) => {
-    const command = input.trim().toLowerCase();
-
-    switch (command) {
-      case 'status':
-        const info = bot.getInfo();
-        console.log('\n📊 Bot Status:');
-        console.log(`   Status: ${info.status}`);
-        console.log(`   Balance: $${info.balance.toFixed(2)}`);
-        console.log(`   Mode: ${info.mode}`);
-        break;
-
-      case 'stats':
-      case 'performance':
-        const stats = bot.getPerformanceSummary(30);
-        console.log('\n📈 Performance (Last 30 days):');
-        console.log(`   Total Trades: ${stats.totalTrades}`);
-        console.log(`   Wins: ${stats.wins} | Losses: ${stats.losses}`);
-        console.log(`   Win Rate: ${stats.winRate.toFixed(2)}%`);
-        console.log(`   Avg Win: $${stats.avgWin.toFixed(2)}`);
-        console.log(`   Avg Loss: $${stats.avgLoss.toFixed(2)}`);
-        console.log(`   Profit Factor: ${stats.profitFactor.toFixed(2)}`);
-        console.log(`   Total Return: ${stats.totalReturn.toFixed(2)}%`);
-        console.log(`   Total PnL: $${stats.totalPnL.toFixed(2)}`);
-        console.log(`   Drawdown: ${stats.drawdown.toFixed(2)}%`);
-        break;
-
-      case 'stop':
-        console.log('\n🛑 Stopping bot...');
-        await bot.stop();
-        console.log('✅ Bot stopped');
-        rl.close();
-        process.exit(0);
-        break;
-
-      case 'emergency':
-        console.log('\n🚨 Emergency stop initiated...');
-        await bot.emergencyStop();
-        console.log('✅ All positions closed, bot stopped');
-        rl.close();
-        process.exit(0);
-        break;
-
-      case 'help':
-        console.log('\n📝 Available commands:');
-        console.log('   status    - Show bot status');
-        console.log('   stats     - Show performance stats');
-        console.log('   stop      - Stop the bot');
-        console.log('   emergency - Emergency stop (close all positions)');
-        console.log('   help      - Show this help');
-        break;
-
-      case '':
-        // Empty input, just show prompt again
-        break;
-
-      default:
-        console.log(`❌ Unknown command: ${command}`);
-        console.log('Type "help" for available commands');
-    }
-
-    rl.prompt();
-  });
-
-  rl.on('close', () => {
-    console.log('\n👋 Goodbye!');
-    process.exit(0);
-  });
-
-  // Handle Ctrl+C
-  process.on('SIGINT', async () => {
-    console.log('\n\n🛑 Received SIGINT, stopping bot...');
-    await bot.stop();
-    process.exit(0);
-  });
 }
 
 // Run the bot
