@@ -157,7 +157,18 @@ export class BacktestEngine {
                     const durationMins = Math.round((result.holdTime) / 1000 / 60);
                     const durationStr = durationMins > 60 ? `${(durationMins / 60).toFixed(1)}h` : `${durationMins}m`;
 
-                    console.log(`\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} (${result.position.pnlPercent?.toFixed(2)}%) | Time: ${durationStr} | Reason: ${result.position.exitReason}`);
+                    // Note: pnlPercent here is ROI on margin (leveraged), not % of account equity
+                    const isLong = position.side === PositionSide.LONG;
+                    const exitPrice = position.closePrice ?? 0;
+                    const notionalRoiPct = position.entry > 0
+                        ? ((isLong ? (exitPrice - position.entry) : (position.entry - exitPrice)) / position.entry) * 100
+                        : 0;
+                    const marginRoiPct = result.position.pnlPercent ?? 0;
+                    console.log(
+                        `\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} ` +
+                        `| ROI: ${notionalRoiPct.toFixed(2)}% notional / ${marginRoiPct.toFixed(2)}% margin ` +
+                        `| Time: ${durationStr} | Reason: ${result.position.exitReason}`
+                    );
                 }
             }
 

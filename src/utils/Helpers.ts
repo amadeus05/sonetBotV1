@@ -157,7 +157,13 @@ export class Helpers {
     leverage: number = 1
   ): { pnl: number; pnlPercent: number } {
     const priceDiff = isLong ? (exit - entry) : (entry - exit);
-    const pnl = (priceDiff / entry) * size * leverage;
+    // IMPORTANT:
+    // - `size` is position NOTIONAL in USD (quantity * price).
+    // - Leverage affects required margin and ROI on margin, but does NOT multiply the raw PnL for a given notional.
+    // Therefore:
+    // - `pnl` is computed from notional only (no leverage multiplier)
+    // - `pnlPercent` is ROI on margin (so it does include leverage)
+    const pnl = (priceDiff / entry) * size;
     const pnlPercent = (priceDiff / entry) * 100 * leverage;
 
     return { pnl, pnlPercent };

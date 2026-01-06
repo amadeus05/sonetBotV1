@@ -286,7 +286,8 @@ export class RiskManager {
     const marginRequiredForNewTrade = notionalSize / riskParams.leverage;
 
     // 3. Расчет общей маржи и ОБЩЕГО РИСКА открытых позиций
-    const openPositions = db.getOpenPositions();
+    // IMPORTANT: In backtest mode we must use in-memory positions, not DB.
+    const openPositions = this.getActivePositions();
     let totalMarginCurrentlyUsed = 0;
     let totalRiskCurrentlyExposed = 0;
 
@@ -371,7 +372,8 @@ export class RiskManager {
   public getRiskSummary(): string {
     const drawdown = this.getCurrentDrawdown();
     const dailyPnL = this.getDailyPnL();
-    const openPositions = db.getOpenPositions();
+    // IMPORTANT: In backtest mode we must use in-memory positions, not DB.
+    const openPositions = this.getActivePositions();
     
     // Calculate current risk exposure for display
     let totalRisk = 0;

@@ -1,6 +1,7 @@
 import {
   Candle,
   MarketData,
+  PullbackAnalysis,
   TradingSignal,
   SignalType,
   TrendDirection,
@@ -12,13 +13,8 @@ import { RegimeDetector } from '../modules/RegimeDetector';
 import { RiskManager } from './RiskManager';
 import { logger } from '../services/Logger';
 
-// =========================
-// STATE MACHINE DEFINITIONS
-// =========================
-
 enum SetupState {
   IDLE,
-  IMPULSE_DETECTED,
   WAITING_PULLBACK,
   PULLBACK_CONFIRMED,
   READY_TO_ENTER,
@@ -29,22 +25,16 @@ enum SetupState {
 interface MomentumSetup {
   state: SetupState;
   direction: TrendDirection;
-
   impulseHigh: number;
   impulseLow: number;
   impulseATR: number;
   impulseVolumeRatio: number;
-
   barsSinceImpulse: number;
-
   pullbackHigh?: number;
   pullbackLow?: number;
   pullbackDepth?: number;
+  pullback?: PullbackAnalysis;
 }
-
-// =========================
-// STRATEGY ENGINE
-// =========================
 
 export class StrategyEngine {
   private trendAnalyzer = new TrendAnalyzer();
@@ -52,85 +42,50 @@ export class StrategyEngine {
   private pullbackScanner = new PullbackScanner();
   private regimeDetector = new RegimeDetector();
   private riskManager: RiskManager;
-
-  // STATE PER SYMBOL
   private setups: Map<string, MomentumSetup> = new Map();
 
   constructor(riskManager: RiskManager) {
     this.riskManager = riskManager;
-    logger.info('StrategyEngine', 'Initialized (Stateful Momentum Pullback)');
+    logger.info('StrategyEngine', 'Initialized (Stateful Momentum Pullback v5.0 - Conservative)');
   }
-
-  // =========================
-  // MAIN ANALYSIS LOOP
-  // =========================
 
   public async analyze(marketData: MarketData): Promise<TradingSignal | null> {
     const { symbol, candles } = marketData;
     const last = candles[candles.length - 1];
 
-    this.debug(symbol, `📊 ANALYZE CALLED`, {
-      candlesCount: candles.length,
-      lastCandle: { o: last.open, h: last.high, l: last.low, c: last.close, v: last.volume, ts: last.timestamp }
-    });
-
-    // === INIT / LOAD SETUP ===
     let setup = this.setups.get(symbol);
     if (!setup) {
-      setup = { state: SetupState.IDLE } as MomentumSetup;
-      this.setups.set(symbol, setup);
+      this.resetSetup(symbol);
+      setup = this.setups.get(symbol)!;
       this.info(symbol, '🆕 NEW SETUP CREATED (IDLE)');
     }
 
-    const stateName = SetupState[setup.state];
-    this.debug(symbol, `🔄 CURRENT STATE: ${stateName}`);
-
-    // === GLOBAL REGIME FILTER ===
+    // === 1. STRICT REGIME FILTER ===
+    // Только явные тренды. Никакого флэта.
     const regime = this.regimeDetector.detect(candles);
     const isTrending = this.regimeDetector.isTrendingRegime(regime);
-    this.debug(symbol, `📈 REGIME`, { regime, isTrending });
-
+    
+    // If regime is not trending, do not start new setups AND invalidate existing ones.
     if (!isTrending) {
-      this.debug(symbol, `⏸️ REGIME FILTER BLOCKED - Not trending, resetting to IDLE`);
-      setup.state = SetupState.IDLE;
-      return null;
+      if (setup.state === SetupState.IDLE) return null;
+      return this.invalidate(symbol, `REGIME_NOT_TRENDING:${regime}`);
     }
 
-    // === TREND CONTEXT (NOT TIMING) ===
     const trend = this.trendAnalyzer.analyze(candles);
-    this.debug(symbol, `📉 TREND`, { direction: TrendDirection[trend.direction], isStrong: trend.isStrong, strength: trend.strength });
 
     switch (setup.state) {
-      // =============================
-      // IDLE — LOOK FOR IMPULSE
-      // =============================
+      // ---------------------------------------------------------
       case SetupState.IDLE: {
-        if (!trend.isStrong || trend.direction === TrendDirection.NEUTRAL) {
-          this.debug(symbol, `⏸️ IDLE: WEAK TREND or NEUTRAL`, { isStrong: trend.isStrong, direction: TrendDirection[trend.direction] });
-          return null;
-        }
+        if (!trend.isStrong || trend.direction === TrendDirection.NEUTRAL) return null;
 
         const momentum = this.momentumDetector.detect(candles);
-        this.debug(symbol, `⚡ MOMENTUM CHECK`, {
-          hasSpike: momentum.hasSpike,
-          momDirection: TrendDirection[momentum.direction],
-          trendDirection: TrendDirection[trend.direction],
-          volumeRatio: momentum.volumeRatio,
-          atr: momentum.atr,
-          high: momentum.high,
-          low: momentum.low
-        });
+        if (!momentum.hasSpike) return null;
+        if (momentum.direction !== trend.direction) return null;
 
-        if (!momentum.hasSpike) {
-          this.debug(symbol, `⏸️ IDLE: NO SPIKE`);
-          return null;
-        }
-        if (momentum.direction !== trend.direction) {
-          this.debug(symbol, `⏸️ IDLE: DIRECTION MISMATCH (momentum: ${TrendDirection[momentum.direction]}, trend: ${TrendDirection[trend.direction]})`);
-          return null;
-        }
+        // Фильтр объема: Входим только если объем импульса был заметным (>1.2x)
+        if (momentum.volumeRatio < 1.2) return null;
 
-        setup.state = SetupState.IMPULSE_DETECTED;
+        setup.state = SetupState.WAITING_PULLBACK;
         setup.direction = trend.direction;
         setup.impulseHigh = momentum.high;
         setup.impulseLow = momentum.low;
@@ -138,135 +93,108 @@ export class StrategyEngine {
         setup.impulseVolumeRatio = momentum.volumeRatio;
         setup.barsSinceImpulse = 0;
 
-        this.debug(symbol, '🔥 IMPULSE DETECTED → WAITING_PULLBACK', {
-          direction: TrendDirection[setup.direction],
-          impulseHigh: setup.impulseHigh,
-          impulseLow: setup.impulseLow,
-          impulseATR: setup.impulseATR,
-          volumeRatio: setup.impulseVolumeRatio
+        this.info(symbol, '🔥 IMPULSE DETECTED → WAITING_PULLBACK', {
+             dir: setup.direction,
+             vol: setup.impulseVolumeRatio.toFixed(2)
         });
         return null;
       }
 
-      // =============================
-      case SetupState.IMPULSE_DETECTED:
-        this.info(symbol, '➡️ IMPULSE_DETECTED → WAITING_PULLBACK');
-        setup.state = SetupState.WAITING_PULLBACK;
-        return null;
-
-      // =============================
-      // WAITING FOR PULLBACK
-      // =============================
+      // ---------------------------------------------------------
       case SetupState.WAITING_PULLBACK: {
         setup.barsSinceImpulse++;
-        this.debug(symbol, `⏳ WAITING_PULLBACK bar ${setup.barsSinceImpulse}/12`);
 
-        // TIMEOUT
-        if (setup.barsSinceImpulse > 30) {
-          this.info(symbol, `⏱️ TIMEOUT after 12 bars`);
-          return this.invalidate(symbol, setup, 'TIMEOUT');
+        // Timeout 50 bars
+        if (setup.barsSinceImpulse > 50) {
+          this.info(symbol, `⏱️ TIMEOUT after 50 bars`);
+          return this.invalidate(symbol, 'TIMEOUT');
         }
 
-        // STRUCTURAL INVALIDATION (both directions)
-        if (setup.direction === TrendDirection.BULLISH && last.low < setup.impulseLow) {
-          this.info(symbol, `💥 BULLISH INVALIDATION: low ${last.low} < impulseLow ${setup.impulseLow}`);
-          return this.invalidate(symbol, setup, 'IMPULSE LOW BROKEN');
-        }
-        if (setup.direction === TrendDirection.BEARISH && last.high > setup.impulseHigh) {
-          this.info(symbol, `💥 BEARISH INVALIDATION: high ${last.high} > impulseHigh ${setup.impulseHigh}`);
-          return this.invalidate(symbol, setup, 'IMPULSE HIGH BROKEN');
-        }
+        // Structural Break
+        if (setup.direction === TrendDirection.BULLISH && last.low < setup.impulseLow) return this.invalidate(symbol, 'IMPULSE LOW BROKEN');
+        if (setup.direction === TrendDirection.BEARISH && last.high > setup.impulseHigh) return this.invalidate(symbol, 'IMPULSE HIGH BROKEN');
 
-        // Pass full trend object (scanner requires isStrong and emaFast)
         const pullback = this.pullbackScanner.scan(candles, trend);
+        if (!pullback.occurred) return null;
+        if (!pullback.isValid) return null;
 
-        this.debug(symbol, `🔍 PULLBACK SCAN`, {
-          occurred: pullback.occurred,
-          low: pullback.low,
-          high: pullback.high
-        });
-
-        if (!pullback.occurred) {
-          this.debug(symbol, `⏸️ NO PULLBACK YET`);
-          return null;
+        // Sanity checks for pullback numbers
+        if (
+          !Number.isFinite(pullback.level) ||
+          !Number.isFinite(pullback.low) ||
+          !Number.isFinite(pullback.high)
+        ) {
+          return this.invalidate(symbol, 'BAD_PULLBACK_NUMBERS');
         }
 
-        // SIMPLIFIED: Just check if pullback is valid (scanner handles depth internally)
-        if (!pullback.isValid) {
-          this.debug(symbol, `⏸️ PULLBACK INVALID (distance: ${pullback.distanceFromEMA.toFixed(2)}%)`);
+        const isLong = setup.direction === TrendDirection.BULLISH;
+        const impulseRange = setup.impulseHigh - setup.impulseLow;
+
+        // Safety: protect against division by zero / NaN fib computations
+        if (!Number.isFinite(impulseRange) || impulseRange <= 0) {
+          return this.invalidate(symbol, 'BAD_IMPULSE_RANGE');
+        }
+        
+        let currentPullbackDist = 0;
+        if (isLong) {
+            // Use pullback.level (swing low) to measure depth, not mixed low/high fields.
+            currentPullbackDist = setup.impulseHigh - pullback.level;
+        } else {
+            // Use pullback.level (swing high) to measure depth.
+            currentPullbackDist = pullback.level - setup.impulseLow;
+        }
+            
+        const fibLevel = currentPullbackDist / impulseRange;
+        if (!Number.isFinite(fibLevel)) {
+          return this.invalidate(symbol, 'BAD_FIB_LEVEL');
+        }
+
+        // FILTER: 30% - 70% (Не берем слишком глубокие откаты, это признак слабости)
+        if (fibLevel < 0.3 || fibLevel > 0.7) {
           return null;
         }
 
         setup.pullbackLow = pullback.low;
         setup.pullbackHigh = pullback.high;
-        setup.pullbackDepth = pullback.distanceFromEMA / 100; // Store as decimal
+        setup.pullbackDepth = pullback.distanceFromEMA / 100;
+        setup.pullback = pullback;
         setup.state = SetupState.PULLBACK_CONFIRMED;
 
-        this.info(symbol, `🟢 PULLBACK CONFIRMED (${pullback.distanceFromEMA.toFixed(2)}% from EMA) → checking bounce`, setup);
-        // Fall through to check bounce
+        this.info(symbol, `🟢 PULLBACK CONFIRMED (Fib: ${fibLevel.toFixed(2)}) → checking bounce`, setup);
+        // Important: do not fall-through; wait for next analyze() call to confirm bounce
+        return null;
       }
 
-      // =============================
-      // CONFIRM REACTION & IMMEDIATE ENTRY
-      // =============================
+      // ---------------------------------------------------------
       case SetupState.PULLBACK_CONFIRMED: {
-        this.debug(symbol, `🔍 CHECKING BOUNCE`, {
-          pullbackLow: setup.pullbackLow,
-          pullbackHigh: setup.pullbackHigh,
-          direction: TrendDirection[setup.direction]
-        });
-
+        if (!setup.pullback) return this.invalidate(symbol, 'PULLBACK_MISSING');
         const bouncing = this.pullbackScanner.isBouncing(
           candles,
-          {
-            occurred: true,
-            low: setup.pullbackLow!,
-            high: setup.pullbackHigh!,
-            level: setup.direction === TrendDirection.BULLISH ? setup.pullbackLow! : setup.pullbackHigh!,
-            distanceFromEMA: 0,
-            isValid: true
-          },
+          setup.pullback,
           setup.direction
         );
 
-        this.debug(symbol, `🏀 BOUNCE CHECK`, { bouncing });
-
         if (!bouncing) {
-          this.debug(symbol, `⏸️ NO BOUNCE YET - waiting for confirmation`);
+          const isLong = setup.direction === TrendDirection.BULLISH;
+          if (isLong && last.close < setup.pullbackLow!) return this.invalidate(symbol, 'LOWER LOW');
+          if (!isLong && last.close > setup.pullbackHigh!) return this.invalidate(symbol, 'HIGHER HIGH');
           return null;
         }
 
-        this.debug(symbol, '🟡 BOUNCE CONFIRMED → READY_TO_ENTER', setup);
         setup.state = SetupState.READY_TO_ENTER;
+        // Important: do not fall-through; generate signal on next analyze() call
+        return null;
       }
 
-      // =============================
-      // ENTRY
-      // =============================
+      // ---------------------------------------------------------
       case SetupState.READY_TO_ENTER: {
-        this.debug(symbol, '🚀 READY_TO_ENTER - generating signal...');
         const signal = this.generateSignal(symbol, candles, setup);
 
-        this.info(symbol, '📋 GENERATED SIGNAL', {
-          type: signal.type,
-          entry: signal.entry,
-          stopLoss: signal.stopLoss,
-          takeProfit: signal.takeProfit,
-          confidence: signal.confidence,
-          positionSize: signal.positionSize
-        });
-
-        if (!signal) {
-          this.debug(symbol, '❌ SIGNAL GENERATION FAILED');
-          return null;
-        }
-
         const validation = this.riskManager.validateSignal(signal);
-        this.info(symbol, '✅ RISK VALIDATION', { valid: validation.valid, reason: validation.reason });
-
+        
         if (!validation.valid) {
           this.info(symbol, `❌ RISK REJECTED: ${validation.reason}`);
-          return this.invalidate(symbol, setup, validation.reason!);
+          return this.invalidate(symbol, validation.reason!);
         }
 
         setup.state = SetupState.ENTERED;
@@ -274,19 +202,18 @@ export class StrategyEngine {
         return signal;
       }
 
-      // =============================
       case SetupState.ENTERED:
-        setup.state = SetupState.IDLE;
+        this.resetSetup(symbol);
         return null;
 
       case SetupState.INVALIDATED:
-        setup.state = SetupState.IDLE;
+        this.resetSetup(symbol);
         return null;
     }
   }
 
   // =========================
-  // SIGNAL GENERATION
+  // SIGNAL GENERATION (Smart Breakout)
   // =========================
 
   private generateSignal(
@@ -296,48 +223,42 @@ export class StrategyEngine {
   ): TradingSignal {
     const isLong = setup.direction === TrendDirection.BULLISH;
 
-    const entry = isLong
-      ? setup.pullbackHigh! + this.getTickSize(symbol)
-      : setup.pullbackLow! - this.getTickSize(symbol);
+    // Вход с минимальным отступом, чтобы не платить лишнее за "подтверждение"
+    const entryBuffer = setup.impulseATR * 0.05; 
+
+    let entry = 0;
+    if (isLong) {
+        entry = setup.pullbackHigh! + entryBuffer;
+    } else {
+        entry = setup.pullbackLow! - entryBuffer;
+    }
 
     const impulseRange = setup.impulseHigh - setup.impulseLow;
     
-    // SL: ATR * 2.5 (чуть плотнее, чем 3)
-    const atrBuffer = setup.impulseATR * 2.5; 
-    const minBuffer = impulseRange * 0.15;
-    const buffer = Math.max(atrBuffer, minBuffer);
-
+    // STOP LOSS: 2.0 ATR (Классика)
+    // Если рынок выбивает 2 ATR, значит тренда нет.
+    const atrBuffer = setup.impulseATR * 2.0; 
+    
     const stopLoss = isLong
-      ? setup.pullbackLow! - buffer
-      : setup.pullbackHigh! + buffer;
+      ? setup.pullbackLow! - atrBuffer
+      : setup.pullbackHigh! + atrBuffer;
+
+    // TAKE PROFIT: 1.3 ATR (Консервативно, но вероятнее)
+    // Мы не жадничаем. Нам нужно забрать прибыль и уйти.
+    // 1.3 - это часто R:R около 1.5-2.0 при узком стопе, но при 2 ATR стопе это может быть меньше.
+    // Поэтому используем MAX(ImpulseRange, 3 ATR) для тейка
+    
+    const targetDist = Math.max(impulseRange, setup.impulseATR * 3.0);
 
     const takeProfit = isLong
-      ? entry + impulseRange * 1.5
-      : entry - impulseRange * 1.5;
+      ? entry + targetDist
+      : entry - targetDist;
 
-    // --- ИСПРАВЛЕННЫЙ РАСЧЕТ CONFIDENCE ---
-    // 1. База 50%
-    let score = 0.5;
-
-    // 2. Бонус за Объем (Max 0.2)
-    // Чтобы получить +0.2, объем должен быть x3 от среднего. x1.5 даст +0.05
-    const volScore = Math.max(0, (setup.impulseVolumeRatio - 1.5) * 0.13);
-    score += Math.min(volScore, 0.2);
-
-    // 3. Бонус за Силу Импульса (Max 0.2)
-    // Отношение Тела к ATR. Если свеча в 3 раза больше ATR -> бонус
-    const momentumScore = (impulseRange / setup.impulseATR) * 0.05;
-    score += Math.min(momentumScore, 0.2);
-
-    // 4. Бонус за качество отката (Max 0.1)
-    // Чем ближе к EMA, тем лучше. setup.pullbackDepth это decimal (0.01 = 1%)
-    // Если откат был в пределах 0.5% от EMA -> +0.1
-    const depth = setup.pullbackDepth || 0.05; 
-    if (depth < 0.005) score += 0.1;       // < 0.5% dist
-    else if (depth < 0.01) score += 0.05;  // < 1.0% dist
-
+    // --- CONFIDENCE ---
+    let score = 0.8; // Базовая уверенность выше, так как мы прошли строгие фильтры
+    if (setup.impulseVolumeRatio > 2.0) score += 0.1;
+    if (setup.barsSinceImpulse < 15) score += 0.1;
     const confidence = Math.min(score, 1.0);
-    // -------------------------------------
 
     const signal: TradingSignal = {
       symbol,
@@ -346,17 +267,11 @@ export class StrategyEngine {
       stopLoss,
       takeProfit,
       positionSize: 0,
-      confidence, // Теперь будет варьироваться от 0.6 до 1.0
+      confidence,
       timestamp: Date.now(),
-      tags: [
-        'momentum_pullback',
-        `pb:${(depth * 100).toFixed(2)}%`,
-        `bars:${setup.barsSinceImpulse}`
-      ],
+      tags: ['momentum_pullback', `vol:${setup.impulseVolumeRatio.toFixed(1)}`],
       metadata: setup
     };
-
-    this.info(symbol, '📋 GENERATED SIGNAL', signal);
 
     const sizing = this.riskManager.calculatePositionSize(signal, candles);
 
@@ -370,13 +285,18 @@ export class StrategyEngine {
   // HELPERS
   // =========================
 
-  private invalidate(
-    symbol: string,
-    setup: MomentumSetup,
-    reason: string
-  ): null {
+  private resetSetup(symbol: string): void {
+      this.setups.set(symbol, { 
+          state: SetupState.IDLE,
+          direction: TrendDirection.NEUTRAL,
+          impulseHigh: 0, impulseLow: 0, impulseATR: 0, impulseVolumeRatio: 0, barsSinceImpulse: 0
+      });
+  }
+
+  private invalidate(symbol: string, reason: string): null {
+    const setup = this.setups.get(symbol);
     this.debug(symbol, `❌ INVALIDATED: ${reason}`, setup);
-    setup.state = SetupState.INVALIDATED;
+    if (setup) setup.state = SetupState.INVALIDATED;
     return null;
   }
 
@@ -389,6 +309,6 @@ export class StrategyEngine {
   }
 
   private getTickSize(symbol: string): number {
-    return 0.01; // TODO: replace with exchange-specific tick size
+    return 0.01; 
   }
 }
