@@ -513,5 +513,84 @@ export class BacktestEngine {
         console.log(`   Max DD: ${result.maxDrawdownPercent.toFixed(2)}%`);
         console.log(`   Profit Factor: ${result.profitFactor.toFixed(2)}`);
         console.log(`   Sharpe: ${result.sharpeRatio.toFixed(2)}\n`);
+
+        this.displayPerSymbolStats();
+    }
+
+    private displayPerSymbolStats(): void {
+        if (this.closedTrades.length === 0) {
+            console.log('🪙 Статистика по монетам: нет сделок.\n');
+            return;
+        }
+
+        type SymbolStats = {
+            symbol: string;
+            trades: number;
+            wins: number;
+            tp: number;
+            sl: number;
+            pnl: number;
+        };
+
+        const statsBySymbol = new Map<string, SymbolStats>();
+
+        for (const trade of this.closedTrades) {
+            const symbol = trade.position.symbol;
+            const exitReason = trade.position.exitReason;
+            const pnl = trade.position.pnl ?? 0;
+
+            const current = statsBySymbol.get(symbol) ?? { symbol, trades: 0, wins: 0, tp: 0, sl: 0, pnl: 0 };
+            current.trades += 1;
+            if (trade.won) current.wins += 1;
+            current.pnl += pnl;
+
+            if (exitReason === TradeExitReason.TAKE_PROFIT) current.tp += 1;
+            else if (exitReason === TradeExitReason.STOP_LOSS) current.sl += 1;
+
+            statsBySymbol.set(symbol, current);
+        }
+
+        const ranked = Array.from(statsBySymbol.values()).sort((a, b) => b.pnl - a.pnl);
+
+        const formatPnl = (value: number) => {
+            const abs = Helpers.formatCurrency(Math.abs(value));
+            return value >= 0 ? `+${abs}` : `-${abs}`;
+        };
+
+        const pad = (s: string, width: number, align: 'left' | 'right' = 'left') => {
+            const str = s ?? '';
+            if (str.length >= width) return str;
+            const spaces = ' '.repeat(width - str.length);
+            return align === 'right' ? `${spaces}${str}` : `${str}${spaces}`;
+        };
+
+        const headers = ['Rank', 'Symbol', 'Trades', 'TP', 'SL', 'WinRate%', 'PnL'];
+        const rows = ranked.map((s, idx) => ([
+            String(idx + 1),
+            s.symbol,
+            String(s.trades),
+            String(s.tp),
+            String(s.sl),
+            `${((s.wins / Math.max(1, s.trades)) * 100).toFixed(1)}%`,
+            formatPnl(s.pnl),
+        ]));
+
+        const colWidths = headers.map((h, colIdx) => {
+            const maxCell = Math.max(h.length, ...rows.map(r => r[colIdx].length));
+            // небольшой запас для читабельности
+            return Math.min(Math.max(maxCell + 2, h.length + 2), 32);
+        });
+
+        const line = '─'.repeat(colWidths.reduce((sum, w) => sum + w, 0) + (headers.length - 1) * 1);
+        console.log('🪙 Статистика по монетам (рейтинг по PnL):');
+        console.log(line);
+        console.log(headers.map((h, i) => pad(h, colWidths[i], i === 1 ? 'left' : 'right')).join(' '));
+        console.log(line);
+
+        for (const row of rows) {
+            console.log(row.map((c, i) => pad(c, colWidths[i], i === 1 ? 'left' : 'right')).join(' '));
+        }
+
+        console.log(line + '\n');
     }
 }
