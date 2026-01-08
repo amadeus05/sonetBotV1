@@ -26,9 +26,11 @@
     "axios": "^1.6.2",
     "better-sqlite3": "^9.2.2",
     "dotenv": "^16.3.1",
+    "inversify": "^7.10.8",
     "lodash": "^4.17.21",
+    "reflect-metadata": "^0.2.2",
     "ws": "^8.18.3",
-    "zod": "^3.22.4"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.8",

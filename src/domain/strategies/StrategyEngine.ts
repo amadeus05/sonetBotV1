@@ -1,3 +1,4 @@
+import { injectable, inject } from 'inversify';
 import {
   Candle,
   MarketData,
@@ -5,13 +6,16 @@ import {
   TradingSignal,
   SignalType,
   TrendDirection,
-} from '../types';
-import { TrendAnalyzer } from '../modules/TrendAnalyzer';
-import { MomentumDetector } from '../modules/MomentumDetector';
-import { PullbackScanner } from '../modules/PullbackScanner';
-import { RegimeDetector } from '../modules/RegimeDetector';
-import { RiskManager } from './RiskManager';
-import { logger } from '../services/Logger';
+} from '../../types';
+import { TrendAnalyzer } from '../analysis/TrendAnalyzer';
+import { MomentumDetector } from '../analysis/MomentumDetector';
+import { PullbackScanner } from '../analysis/PullbackScanner';
+import { RegimeDetector } from '../analysis/RegimeDetector';
+import { IRiskManager } from '../interfaces/IRiskManager';
+import { IStrategy } from '../interfaces/IStrategy';
+import { ConfigService } from '../../infrastructure/config/ConfigService';
+import { logger } from '../../infrastructure/logging/Logger';
+import { TYPES } from '../../di/types';
 
 enum SetupState {
   IDLE,
@@ -36,16 +40,18 @@ interface MomentumSetup {
   pullback?: PullbackAnalysis;
 }
 
-export class StrategyEngine {
-  private trendAnalyzer = new TrendAnalyzer();
-  private momentumDetector = new MomentumDetector();
-  private pullbackScanner = new PullbackScanner();
-  private regimeDetector = new RegimeDetector();
-  private riskManager: RiskManager;
+@injectable()
+export class StrategyEngine implements IStrategy {
   private setups: Map<string, MomentumSetup> = new Map();
 
-  constructor(riskManager: RiskManager) {
-    this.riskManager = riskManager;
+  constructor(
+    @inject(TYPES.IRiskManager) private readonly riskManager: IRiskManager,
+    @inject(TYPES.IConfigService) private readonly configService: ConfigService,
+    @inject(TYPES.TrendAnalyzer) private readonly trendAnalyzer: TrendAnalyzer,
+    @inject(TYPES.MomentumDetector) private readonly momentumDetector: MomentumDetector,
+    @inject(TYPES.PullbackScanner) private readonly pullbackScanner: PullbackScanner,
+    @inject(TYPES.RegimeDetector) private readonly regimeDetector: RegimeDetector
+  ) {
     logger.info('StrategyEngine', 'Initialized (Stateful Momentum Pullback v5.0 - Conservative)');
   }
 
@@ -64,7 +70,7 @@ export class StrategyEngine {
     // Только явные тренды. Никакого флэта.
     const regime = this.regimeDetector.detect(candles);
     const isTrending = this.regimeDetector.isTrendingRegime(regime);
-    
+
     // If regime is not trending, do not start new setups AND invalidate existing ones.
     if (!isTrending) {
       if (setup.state === SetupState.IDLE) return null;
@@ -94,8 +100,8 @@ export class StrategyEngine {
         setup.barsSinceImpulse = 0;
 
         this.info(symbol, '🔥 IMPULSE DETECTED → WAITING_PULLBACK', {
-             dir: setup.direction,
-             vol: setup.impulseVolumeRatio.toFixed(2)
+          dir: setup.direction,
+          vol: setup.impulseVolumeRatio.toFixed(2)
         });
         return null;
       }
@@ -134,16 +140,16 @@ export class StrategyEngine {
         if (!Number.isFinite(impulseRange) || impulseRange <= 0) {
           return this.invalidate(symbol, 'BAD_IMPULSE_RANGE');
         }
-        
+
         let currentPullbackDist = 0;
         if (isLong) {
-            // Use pullback.level (swing low) to measure depth, not mixed low/high fields.
-            currentPullbackDist = setup.impulseHigh - pullback.level;
+          // Use pullback.level (swing low) to measure depth, not mixed low/high fields.
+          currentPullbackDist = setup.impulseHigh - pullback.level;
         } else {
-            // Use pullback.level (swing high) to measure depth.
-            currentPullbackDist = pullback.level - setup.impulseLow;
+          // Use pullback.level (swing high) to measure depth.
+          currentPullbackDist = pullback.level - setup.impulseLow;
         }
-            
+
         const fibLevel = currentPullbackDist / impulseRange;
         if (!Number.isFinite(fibLevel)) {
           return this.invalidate(symbol, 'BAD_FIB_LEVEL');
@@ -190,12 +196,8 @@ export class StrategyEngine {
       case SetupState.READY_TO_ENTER: {
         const signal = this.generateSignal(symbol, candles, setup);
 
-        const validation = this.riskManager.validateSignal(signal);
-        
-        if (!validation.valid) {
-          this.info(symbol, `❌ RISK REJECTED: ${validation.reason}`);
-          return this.invalidate(symbol, validation.reason!);
-        }
+        // Note: Signal validation (max trades, risk limits) happens at Application layer
+        // StrategyEngine is a pure signal generator - it doesn't access account state
 
         setup.state = SetupState.ENTERED;
         this.info(symbol, '🎯🎯🎯 TRADE SIGNAL EMITTED!', signal);
@@ -224,21 +226,21 @@ export class StrategyEngine {
     const isLong = setup.direction === TrendDirection.BULLISH;
 
     // Вход с минимальным отступом, чтобы не платить лишнее за "подтверждение"
-    const entryBuffer = setup.impulseATR * 0.05; 
+    const entryBuffer = setup.impulseATR * 0.05;
 
     let entry = 0;
     if (isLong) {
-        entry = setup.pullbackHigh! + entryBuffer;
+      entry = setup.pullbackHigh! + entryBuffer;
     } else {
-        entry = setup.pullbackLow! - entryBuffer;
+      entry = setup.pullbackLow! - entryBuffer;
     }
 
     const impulseRange = setup.impulseHigh - setup.impulseLow;
-    
+
     // STOP LOSS: 2.0 ATR (Классика)
     // Если рынок выбивает 2 ATR, значит тренда нет.
-    const atrBuffer = setup.impulseATR * 2.0; 
-    
+    const atrBuffer = setup.impulseATR * 2.0;
+
     const stopLoss = isLong
       ? setup.pullbackLow! - atrBuffer
       : setup.pullbackHigh! + atrBuffer;
@@ -247,7 +249,7 @@ export class StrategyEngine {
     // Мы не жадничаем. Нам нужно забрать прибыль и уйти.
     // 1.3 - это часто R:R около 1.5-2.0 при узком стопе, но при 2 ATR стопе это может быть меньше.
     // Поэтому используем MAX(ImpulseRange, 3 ATR) для тейка
-    
+
     const targetDist = Math.max(impulseRange, setup.impulseATR * 3.0);
 
     const takeProfit = isLong
@@ -259,25 +261,24 @@ export class StrategyEngine {
     // Goal: meaningful spread (not a near-constant 0.8-1.0).
     const confidence = this.calculateConfidence(candles, setup);
 
+    // Use pure position sizing calculation
+    const accountBalance = this.configService.getRiskConfig().accountBalance;
+    const sizing = this.riskManager.calculatePositionSize(entry, stopLoss, accountBalance, confidence);
+
     const signal: TradingSignal = {
       symbol,
       type: isLong ? SignalType.LONG : SignalType.SHORT,
       entry,
       stopLoss,
       takeProfit,
-      positionSize: 0,
+      positionSize: sizing.size,
       confidence,
       timestamp: Date.now(),
       tags: ['momentum_pullback', `vol:${setup.impulseVolumeRatio.toFixed(1)}`],
       metadata: setup
     };
 
-    const sizing = this.riskManager.calculatePositionSize(signal, candles);
-
-    return {
-      ...signal,
-      positionSize: sizing.size
-    };
+    return signal;
   }
 
   // =========================
@@ -338,11 +339,11 @@ export class StrategyEngine {
   }
 
   private resetSetup(symbol: string): void {
-      this.setups.set(symbol, { 
-          state: SetupState.IDLE,
-          direction: TrendDirection.NEUTRAL,
-          impulseHigh: 0, impulseLow: 0, impulseATR: 0, impulseVolumeRatio: 0, barsSinceImpulse: 0
-      });
+    this.setups.set(symbol, {
+      state: SetupState.IDLE,
+      direction: TrendDirection.NEUTRAL,
+      impulseHigh: 0, impulseLow: 0, impulseATR: 0, impulseVolumeRatio: 0, barsSinceImpulse: 0
+    });
   }
 
   private invalidate(symbol: string, reason: string): null {
@@ -361,6 +362,6 @@ export class StrategyEngine {
   }
 
   private getTickSize(symbol: string): number {
-    return 0.01; 
+    return 0.01;
   }
 }

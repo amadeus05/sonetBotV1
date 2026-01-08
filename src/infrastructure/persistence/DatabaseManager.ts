@@ -5,8 +5,8 @@
 
 import Database from 'better-sqlite3';
 import * as path from 'path';
-import { Position, TradeResult, BacktestResult, PositionStatus, Candle } from '../types';
-import { logger } from './Logger';
+import { Position, TradeResult, BacktestResult, PositionStatus, Candle } from '../../types';
+import { logger } from '../logging/Logger';
 
 export class DatabaseManager {
   private static instance: DatabaseManager;
@@ -382,9 +382,9 @@ export class DatabaseManager {
     const insertMany = this.db.transaction((items: Candle[]) => {
       for (const c of items) {
         insert.run(
-            symbol, timeframe, c.timestamp, 
-            c.open, c.high, c.low, c.close, c.volume, 
-            c.takerBuyBaseVolume || 0, c.openInterest || 0
+          symbol, timeframe, c.timestamp,
+          c.open, c.high, c.low, c.close, c.volume,
+          c.takerBuyBaseVolume || 0, c.openInterest || 0
         );
       }
     });
@@ -431,11 +431,29 @@ export class DatabaseManager {
     const result = stmt.get(symbol, timeframe, startTime, endTime) as { count: number };
 
     // Calculate expected candle count based on timeframe
-    const timeframeMs = timeframe === '15m' ? 15 * 60 * 1000 : 5 * 60 * 1000;
-    const expectedCount = Math.floor((endTime - startTime) / timeframeMs);
+    const timeframeMs = this.parseTimeframeMs(timeframe);
+    const expectedCount = timeframeMs > 0 ? Math.floor((endTime - startTime) / timeframeMs) : 0;
 
     // Require at least 80% of expected candles to use cache
+    if (expectedCount <= 0) return result.count > 0;
     return result.count >= expectedCount * 0.8;
+  }
+
+  private parseTimeframeMs(timeframe: string): number {
+    const tf = (timeframe || '').trim();
+    const match = tf.match(/^(\d+)([mhdw])$/i);
+    if (!match) return 0;
+    const value = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    if (!Number.isFinite(value) || value <= 0) return 0;
+
+    switch (unit) {
+      case 'm': return value * 60 * 1000;
+      case 'h': return value * 60 * 60 * 1000;
+      case 'd': return value * 24 * 60 * 60 * 1000;
+      case 'w': return value * 7 * 24 * 60 * 60 * 1000;
+      default: return 0;
+    }
   }
 
   public close(): void {

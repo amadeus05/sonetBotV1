@@ -1,19 +1,23 @@
 /**
- * Main Entry Point
- * Start the trading bot here
+ * Main Entry Point (Clean Architecture)
+ * 
+ * Uses InversifyJS DI container to resolve dependencies.
+ * IMPORTANT: reflect-metadata must be imported FIRST.
  */
 
-import { TradingBot } from './core/TradingBot';
-import { logger } from './services/Logger';
+import 'reflect-metadata';
+import { container } from './di/container';
+import { TYPES } from './di/types';
+import { TradingBot } from './app/TradingBot';
 
 // Handle unhandled rejections
 process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Process', 'Unhandled Rejection', { reason, promise });
+  console.error('❌ Unhandled Rejection:', reason);
 });
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error) => {
-  logger.error('Process', 'Uncaught Exception', error);
+  console.error('❌ Uncaught Exception:', error);
   process.exit(1);
 });
 
@@ -24,37 +28,31 @@ async function main() {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
 ║                                                           ║
-║       🤖 ALGO TRADING BOT - Professional Edition         ║
+║       🤖 ALGO TRADING BOT - Clean Architecture           ║
 ║                                                           ║
-║       Strategy: Trend-Following Momentum                  ║
-║       Target: 40-50% Win Rate | R:R 1:2-1:3             ║
+║       Phase 1: DI + Domain Layer Proof of Concept        ║
 ║                                                           ║
 ╚═══════════════════════════════════════════════════════════╝
   `);
 
-  const bot = new TradingBot();
+  // Resolve TradingBot from DI container
+  // This automatically injects IExchange -> BinanceAdapter
+  const bot = container.get<TradingBot>(TYPES.TradingBot);
 
-  // Display bot info
-  const info = bot.getInfo();
-  console.log('\n📋 Bot Configuration:');
-  console.log(`   Mode: ${info.mode}`);
-  console.log(`   Symbols: ${info.symbols.join(', ')}`);
-  console.log(`   Timeframe: ${info.timeframe}`);
-  console.log(`   Leverage: ${info.leverage}x`);
-  console.log(`   Risk per trade: ${info.riskPerTrade}`);
-  console.log(`   Starting balance: $${info.balance}\n`);
+  console.log('📦 [DI] TradingBot resolved from container');
+  console.log('📦 [DI] IExchange bound to BinanceAdapter');
 
-  // Start bot
+  // Run the bot
   try {
     await bot.start();
   } catch (error: any) {
-    logger.error('Main', 'Failed to start bot', error.message);
+    console.error('❌ [Main] Failed to start bot:', error.message);
     process.exit(1);
   }
 }
 
-// Run the bot
+// Run
 main().catch(error => {
-  logger.error('Main', 'Fatal error', error);
+  console.error('❌ [Main] Fatal error:', error);
   process.exit(1);
 });

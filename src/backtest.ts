@@ -3,10 +3,13 @@
  * Run: npm run backtest
  */
 
-import { BacktestEngine } from './core/BacktestEngine';
+import 'reflect-metadata';
+import { container } from './di/container';
+import { TYPES } from './di/types';
+import { BacktestEngine } from './app/BacktestEngine';
 import { BacktestConfig } from './types';
-import { config } from './config/ConfigManager';
-import { logger } from './services/Logger';
+import { config } from './infrastructure/config/ConfigService';
+import { logger } from './infrastructure/logging/Logger';
 
 async function runBacktest() {
   console.log(`
@@ -24,16 +27,16 @@ async function runBacktest() {
     // Test last 30 days
     startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
     endDate: new Date(),
-    
+
     // Symbols to test
     symbols: config.getConfig().symbols,
-    
+
     // Starting balance
     initialBalance: config.getRiskConfig().accountBalance,
-    
+
     // Strategy config
     strategy: config.getStrategyConfig(),
-    
+
     // Risk config
     risk: config.getRiskConfig()
   };
@@ -46,14 +49,14 @@ async function runBacktest() {
   console.log(`   Leverage: ${backtestConfig.risk.leverage}x\n`);
 
   // Run backtest
-  const engine = new BacktestEngine();
-  
+  const engine = container.get<BacktestEngine>(TYPES.BacktestEngine);
+
   try {
     const result = await engine.run(backtestConfig);
-    
+
     // Results are displayed by the engine
     process.exit(0);
-    
+
   } catch (error: any) {
     logger.error('Backtest', 'Backtest failed', error.message);
     process.exit(1);

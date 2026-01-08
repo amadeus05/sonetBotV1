@@ -4,8 +4,10 @@
  * Different regimes require different strategies
  */
 
-import { Candle, MarketRegime } from '../types';
-import { TechnicalIndicators } from '../utils/TechnicalIndicators';
+import { injectable, inject } from 'inversify';
+import { Candle, MarketRegime } from '../../types';
+import { IIndicators } from '../interfaces/IIndicators';
+import { TYPES } from '../../di/types';
 
 // Константы периодов для индикаторов
 const ADX_PERIOD = 14;
@@ -15,7 +17,12 @@ const VOLATILITY_PERIOD = 20;
 // Но минимум period * 2 достаточен для старта расчета.
 const MIN_CANDLES_REQUIRED = Math.max(ADX_PERIOD * 2, VOLATILITY_PERIOD);
 
+@injectable()
 export class RegimeDetector {
+  constructor(
+    @inject(TYPES.IIndicators) private readonly indicators: IIndicators
+  ) { }
+
   /**
    * Detect current market regime
    */
@@ -93,7 +100,7 @@ export class RegimeDetector {
     }
 
     // Calculate first DX to start the ADX smoothing chain
-    
+
     const dxList: number[] = [];
 
     // Helper to calculate DX from smoothed components
@@ -147,7 +154,7 @@ export class RegimeDetector {
     // Это гарантирует расчет волатильности только для локального окна.
     const recentCandles = candles.slice(-period);
     const closes = recentCandles.map(c => c.close);
-    
+
     const returns: number[] = [];
 
     for (let i = 1; i < closes.length; i++) {
@@ -156,7 +163,7 @@ export class RegimeDetector {
     }
 
     // Standard deviation of returns
-    return TechnicalIndicators.stdDev(returns) * 100; // As percentage
+    return this.indicators.stdDev(returns) * 100; // As percentage
   }
 
   /**
@@ -207,12 +214,12 @@ export class RegimeDetector {
    * Updated: Now accepts optional cached ADX and Volatility to prevent recalculation.
    */
   public getRegimeStrength(
-      candles: Candle[], 
-      regime: MarketRegime, 
-      cachedAdx?: number, 
-      cachedVolatility?: number
-    ): number {
-    
+    candles: Candle[],
+    regime: MarketRegime,
+    cachedAdx?: number,
+    cachedVolatility?: number
+  ): number {
+
     // Используем кешированное значение или считаем заново, если не передано
     const adx = cachedAdx ?? this.calculateStandardADX(candles, ADX_PERIOD);
 
@@ -220,16 +227,16 @@ export class RegimeDetector {
       case MarketRegime.TRENDING:
         // Stronger trend = higher ADX
         return Math.min(adx / 50, 1);
-      
+
       case MarketRegime.RANGING:
         // Stronger range = lower ADX
         return Math.min((30 - adx) / 30, 1);
-      
+
       case MarketRegime.VOLATILE:
         // Based on volatility
         const volatility = cachedVolatility ?? this.calculateVolatility(candles, VOLATILITY_PERIOD);
         return Math.min(volatility / 5, 1);
-      
+
       default:
         return 0;
     }
@@ -248,7 +255,7 @@ export class RegimeDetector {
 
     // Calculate once
     const adx = this.calculateStandardADX(candles, ADX_PERIOD);
-    
+
     // Pass calculated ADX to strength function
     const strength = this.getRegimeStrength(candles, regime, adx);
 

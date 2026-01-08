@@ -3,9 +3,11 @@
  * Detects pullbacks based on PRICE ACTION, not EMA proximity
  */
 
-import { Candle, PullbackAnalysis, TrendDirection, TrendAnalysis } from '../types';
-import { config } from '../config/ConfigManager';
+import { injectable } from 'inversify';
+import { Candle, PullbackAnalysis, TrendDirection, TrendAnalysis } from '../../types';
+import { config } from '../../infrastructure/config/ConfigService';
 
+@injectable()
 export class PullbackScanner {
   /**
    * Scan for pullback based on recent price action
@@ -32,16 +34,16 @@ export class PullbackScanner {
       // In uptrend, look for a swing low (retracement down)
       const lows = recentCandles.map(c => c.low);
       pullbackLevel = Math.min(...lows);
-      
+
       // Occurred if recent low is below the EMA (showing retracement)
       const currentPrice = recentCandles[recentCandles.length - 1].close;
       occurred = pullbackLevel < trend.emaFast && currentPrice >= pullbackLevel * 0.998;
-      
+
     } else {
       // In downtrend, look for a swing high (retracement up)
       const highs = recentCandles.map(c => c.high);
       pullbackLevel = Math.max(...highs);
-      
+
       // Occurred if recent high is above the EMA (showing retracement)
       const currentPrice = recentCandles[recentCandles.length - 1].close;
       occurred = pullbackLevel > trend.emaFast && currentPrice <= pullbackLevel * 1.002;
@@ -69,8 +71,8 @@ export class PullbackScanner {
    * SIMPLIFIED: Just check if last 2 candles show reversal
    */
   public isBouncing(
-    candles: Candle[], 
-    pullback: PullbackAnalysis, 
+    candles: Candle[],
+    pullback: PullbackAnalysis,
     trend: TrendDirection
   ): boolean {
     if (!pullback.occurred || candles.length < 3) return false;
@@ -84,7 +86,7 @@ export class PullbackScanner {
       const isGreen = currentCandle.close > currentCandle.open;
       const higherClose = currentCandle.close > prevCandle.close;
       return isGreen && higherClose;
-      
+
     } else {
       // Bearish bounce: Current candle closing lower than previous
       const isRed = currentCandle.close < currentCandle.open;
@@ -133,7 +135,7 @@ export class PullbackScanner {
    */
   public isTooDeep(pullback: PullbackAnalysis, trend: TrendAnalysis): boolean {
     if (!pullback.occurred) return false;
-    
+
     const maxDepth = config.getStrategyConfig().maxPullbackDistance * 100 * 1.5;
     return pullback.distanceFromEMA > maxDepth;
   }

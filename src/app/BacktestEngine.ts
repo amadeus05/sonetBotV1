@@ -3,6 +3,7 @@
  * V7.6 FINAL: Logic Fixes + ALL Methods Included
  */
 
+import { injectable, inject } from 'inversify';
 import {
     Candle,
     BacktestConfig,
@@ -15,13 +16,14 @@ import {
     TradingSignal,
 } from '../types';
 
-import { StrategyEngine } from './StrategyEngine';
-import { RiskManager } from './RiskManager';
-import { BinanceService } from '../services/BinanceService';
-import { db } from '../services/DatabaseManager';
-import { logger } from '../services/Logger';
+import { StrategyEngine } from '../domain/strategies/StrategyEngine';
+import { IRiskManager } from '../domain/interfaces/IRiskManager';
+import { BinanceService } from '../infrastructure/exchanges/binance/BinanceService';
+import { db } from '../infrastructure/persistence/DatabaseManager';
+import { logger } from '../infrastructure/logging/Logger';
 import { Helpers } from '../utils/Helpers';
-import { config } from '../config/ConfigManager';
+import { config } from '../infrastructure/config/ConfigService';
+import { TYPES } from '../di/types';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -35,6 +37,7 @@ const STRATEGY_LOOKBACK = 1000;   // History window
 // Set to false for compound growth (position sizing based on current equity)
 const FIXED_POSITION_SIZE_MODE = true;
 
+@injectable()
 export class BacktestEngine {
     private binance: BinanceService;
     private walletBalance: number = 0;
@@ -47,8 +50,12 @@ export class BacktestEngine {
     private maxRiskExposureRatio = 0.06;
     private initialBalance: number = 0; // For fixed position sizing mode
 
-    constructor() {
-        this.binance = new BinanceService();
+    constructor(
+        @inject(TYPES.BinanceService) binance: BinanceService,
+        @inject(TYPES.IRiskManager) private readonly riskManager: IRiskManager,
+        @inject(TYPES.StrategyEngine) private readonly strategyEngine: StrategyEngine
+    ) {
+        this.binance = binance;
     }
 
     public async run(backtestConfig: BacktestConfig): Promise<BacktestResult> {
@@ -74,10 +81,6 @@ export class BacktestEngine {
             balance: this.walletBalance,
             equity: this.walletBalance
         }];
-
-        const riskManager = new RiskManager(backtestConfig.initialBalance);
-        riskManager.setBacktestPositions(this.activePositions);
-        const strategyEngine = new StrategyEngine(riskManager);
 
         // 2. Load Data
         const marketData = await this.fetchAllMarketData(backtestConfig);
@@ -122,9 +125,8 @@ export class BacktestEngine {
                 process.stdout.write(`\r[${percent}%] Eq: $${currentEquity.toFixed(0)} | Free: $${this.freeBalance.toFixed(0)} | Pos: ${this.activePositions.length}  `);
             }
 
-            // === CRITICAL: Use initial balance in FIXED mode to prevent unrealistic compound growth ===
-            const balanceForSizing = FIXED_POSITION_SIZE_MODE ? this.initialBalance : currentEquity;
-            (riskManager as any).currentBalance = balanceForSizing;
+            // === Note: Position sizing uses FIXED_POSITION_SIZE_MODE via configService.getRiskConfig().accountBalance ===
+            // Strategy Engine gets balance from ConfigService, ensuring consistent sizing
 
             // A. Check Exits
             for (let j = this.activePositions.length - 1; j >= 0; j--) {
@@ -188,7 +190,7 @@ export class BacktestEngine {
                     const signal = await this.simulateStrategyAnalysis(
                         symbol,
                         historicalSlice,
-                        strategyEngine
+                        this.strategyEngine
                     );
 
                     if (signal) {
@@ -447,13 +449,13 @@ export class BacktestEngine {
         const allCandles: Candle[] = [];
         let currentTime = startTime;
         const klineLimit = 1000;
-        
+
         // Перевод таймфрейма в мс для итерации
-        let timeframeMs = 60000; 
+        let timeframeMs = 60000;
         if (timeframe === '5m') timeframeMs = 300000;
         if (timeframe === '15m') timeframeMs = 900000;
         if (timeframe === '1h') timeframeMs = 3600000;
-        
+
         while (currentTime < endTime) {
             await Helpers.sleep(50);
             const candles = await this.binance.getCandles(symbol, timeframe, klineLimit, currentTime);

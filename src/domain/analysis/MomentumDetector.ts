@@ -4,11 +4,19 @@
  * Using RSI, volume analysis, and price velocity
  */
 
-import { Candle, MomentumSignal, TrendDirection } from '../types';
-import { TechnicalIndicators } from '../utils/TechnicalIndicators';
-import { config } from '../config/ConfigManager';
+import { injectable, inject } from 'inversify';
+import { Candle, MomentumSignal, TrendDirection } from '../../types';
+import { IIndicators } from '../../domain/interfaces/IIndicators';
+import { TYPES } from '../../di/types';
+import { config } from '../../infrastructure/config/ConfigService';
+import { Candle as DomainCandle } from '../../domain/entities/Candle';
 
+@injectable()
 export class MomentumDetector {
+  constructor(
+    @inject(TYPES.IIndicators) private readonly indicators: IIndicators
+  ) { }
+
   /**
    * Detect momentum signals
    */
@@ -17,8 +25,8 @@ export class MomentumDetector {
 
     // Calculate RSI
     const closes = candles.map(c => c.close);
-    const rsiValues = TechnicalIndicators.rsi(closes, strategyConfig.rsiPeriod);
-    
+    const rsiValues = this.indicators.rsi(closes, strategyConfig.rsiPeriod);
+
     if (rsiValues.length === 0) {
       return this.getNeutralMomentum();
     }
@@ -51,8 +59,11 @@ export class MomentumDetector {
     const high = Math.max(...recentCandles.map(c => c.high));
     const low = Math.min(...recentCandles.map(c => c.low));
 
-    // Calculate ATR
-    const atrValues = TechnicalIndicators.atr(candles, 14);
+    // Calculate ATR - convert to domain candles
+    const domainCandles = candles.map(c => new DomainCandle(
+      c.timestamp, c.open, c.high, c.low, c.close, c.volume
+    ));
+    const atrValues = this.indicators.atr(domainCandles, 14);
     const atr = atrValues.length > 0 ? atrValues[atrValues.length - 1] : (high - low);
 
     return {
@@ -74,8 +85,12 @@ export class MomentumDetector {
     if (candles.length < 20) return 1;
 
     const currentVolume = candles[candles.length - 1].volume;
-    const avgVolume = TechnicalIndicators.volumeAverage(candles, 20);
-    
+    // Convert to domain candles for volumeAverage
+    const domainCandles = candles.map(c => new DomainCandle(
+      c.timestamp, c.open, c.high, c.low, c.close, c.volume
+    ));
+    const avgVolume = this.indicators.volumeAverage(domainCandles, 20);
+
     if (avgVolume.length === 0) return 1;
 
     const recentAvgVolume = avgVolume[avgVolume.length - 1];
@@ -116,11 +131,11 @@ export class MomentumDetector {
     // 1. Strong volume (1.8x+) alone
     // 2. OR volume (1.5x+) + price movement (0.5%+)
     // 3. OR RSI extreme + volume spike
-    
+
     if (volumeRatio >= 1.8) return true; // Strong volume alone
     if (volumeSpike && significantMove) return true; // Both present
     if (rsiExtreme && volumeSpike) return true; // RSI + volume
-    
+
     return false;
   }
 
@@ -135,7 +150,7 @@ export class MomentumDetector {
     // Price change is primary signal
     if (priceChange > 0.5) return TrendDirection.BULLISH;
     if (priceChange < -0.5) return TrendDirection.BEARISH;
-    
+
     // RSI as secondary confirmation
     if (rsi > 55) return TrendDirection.BULLISH;
     if (rsi < 45) return TrendDirection.BEARISH;
@@ -189,7 +204,7 @@ export class MomentumDetector {
     }
 
     const closes = candles.map(c => c.close);
-    const rsiValues = TechnicalIndicators.rsi(closes, 14);
+    const rsiValues = this.indicators.rsi(closes, 14);
 
     if (rsiValues.length < 30) {
       return { bullishDiv: false, bearishDiv: false };

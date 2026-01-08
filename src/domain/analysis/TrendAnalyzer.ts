@@ -8,11 +8,19 @@
  * 4. Regime integration
  */
 
-import { Candle, TrendDirection, TrendAnalysis, MarketRegime } from '../types';
-import { TechnicalIndicators } from '../utils/TechnicalIndicators';
-import { config } from '../config/ConfigManager';
+import { injectable, inject } from 'inversify';
+import { Candle, TrendDirection, TrendAnalysis, MarketRegime } from '../../types';
+import { IIndicators } from '../interfaces/IIndicators';
+import { Candle as DomainCandle } from '../../domain/entities/Candle';
+import { TYPES } from '../../di/types';
+import { config } from '../../infrastructure/config/ConfigService';
 
+@injectable()
 export class TrendAnalyzer {
+  constructor(
+    @inject(TYPES.IIndicators) private readonly indicators: IIndicators
+  ) { }
+
   /**
    * Analyze trend using EMAs, price structure, and candle quality
    * @param regime (Optional) Pass current market regime for context-aware scoring
@@ -22,8 +30,8 @@ export class TrendAnalyzer {
     const strategyConfig = config.getStrategyConfig();
 
     // Calculate EMAs
-    const emaFast = TechnicalIndicators.ema(closes, strategyConfig.emaFast);
-    const emaSlow = TechnicalIndicators.ema(closes, strategyConfig.emaSlow);
+    const emaFast = this.indicators.ema(closes, strategyConfig.emaFast);
+    const emaSlow = this.indicators.ema(closes, strategyConfig.emaSlow);
 
     if (emaFast.length === 0 || emaSlow.length === 0) {
       return this.getNeutralTrend();
@@ -114,7 +122,11 @@ export class TrendAnalyzer {
     // (Feedback Point #3: Dynamic Lookback)
     // Используем окно относительно медленной EMA, а не хардкод 20
     const structureLookback = Math.max(emaSlowPeriod, 20);
-    const trendStructure = TechnicalIndicators.detectTrendStructure(candles, structureLookback);
+    // Convert to domain Candle entities for the interface
+    const domainCandles = candles.map(c => new DomainCandle(
+      c.timestamp, c.open, c.high, c.low, c.close, c.volume
+    ));
+    const trendStructure = this.indicators.detectTrendStructure(domainCandles, structureLookback);
     let structureScore = 0;
 
     const isBullish = emaFast > emaSlow;
@@ -179,14 +191,14 @@ export class TrendAnalyzer {
     const closes = candles.map(c => c.close);
     const strategyConfig = config.getStrategyConfig();
     // Используем более быстрые настройки для детекции разворота
-    const emaFast = TechnicalIndicators.ema(closes, strategyConfig.emaFast); // Было 20
-    const emaSlow = TechnicalIndicators.ema(closes, strategyConfig.emaSlow); // Было 50
+    const emaFast = this.indicators.ema(closes, strategyConfig.emaFast); // Было 20
+    const emaSlow = this.indicators.ema(closes, strategyConfig.emaSlow); // Было 50
 
     // Check for EMA crossover
     if (currentTrend === TrendDirection.BULLISH) {
-      return TechnicalIndicators.crossUnder(emaFast, emaSlow);
+      return this.indicators.crossUnder(emaFast, emaSlow);
     } else if (currentTrend === TrendDirection.BEARISH) {
-      return TechnicalIndicators.crossOver(emaFast, emaSlow);
+      return this.indicators.crossOver(emaFast, emaSlow);
     }
 
     return false;
