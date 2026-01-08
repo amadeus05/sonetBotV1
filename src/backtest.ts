@@ -6,7 +6,7 @@
 import 'reflect-metadata';
 import { container } from './di/container';
 import { TYPES } from './di/types';
-import { BacktestEngine } from './app/BacktestEngine';
+import { BacktestRunner } from './app/BacktestRunner';
 import { BacktestConfig } from './types';
 import { config } from './infrastructure/config/ConfigService';
 import { logger } from './infrastructure/logging/Logger';
@@ -49,7 +49,7 @@ async function runBacktest() {
   console.log(`   Leverage: ${backtestConfig.risk.leverage}x\n`);
 
   // Run backtest
-  const engine = container.get<BacktestEngine>(TYPES.BacktestEngine);
+  const engine = container.get<BacktestRunner>(TYPES.BacktestEngine);
 
   try {
     const result = await engine.run(backtestConfig);

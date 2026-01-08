@@ -16,7 +16,7 @@ import {
     TradingSignal,
 } from '../types';
 
-import { StrategyEngine } from '../domain/strategies/StrategyEngine';
+import { MomentumStrategy } from '../domain/strategies/MomentumStrategy';
 import { IRiskManager } from '../domain/interfaces/IRiskManager';
 import { BinanceService } from '../infrastructure/exchanges/binance/BinanceService';
 import { db } from '../infrastructure/persistence/DatabaseManager';
@@ -38,7 +38,7 @@ const STRATEGY_LOOKBACK = 1000;   // History window
 const FIXED_POSITION_SIZE_MODE = true;
 
 @injectable()
-export class BacktestEngine {
+export class BacktestRunner {
     private binance: BinanceService;
     private walletBalance: number = 0;
     private freeBalance: number = 0;
@@ -53,7 +53,7 @@ export class BacktestEngine {
     constructor(
         @inject(TYPES.BinanceService) binance: BinanceService,
         @inject(TYPES.IRiskManager) private readonly riskManager: IRiskManager,
-        @inject(TYPES.StrategyEngine) private readonly strategyEngine: StrategyEngine
+        @inject(TYPES.StrategyEngine) private readonly strategyEngine: MomentumStrategy
     ) {
         this.binance = binance;
     }
@@ -482,7 +482,7 @@ export class BacktestEngine {
         return sorted;
     }
 
-    private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: StrategyEngine): Promise<TradingSignal | null> {
+    private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: MomentumStrategy): Promise<TradingSignal | null> {
 
         const marketData = {
             symbol,

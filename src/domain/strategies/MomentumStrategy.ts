@@ -41,7 +41,7 @@ interface MomentumSetup {
 }
 
 @injectable()
-export class StrategyEngine implements IStrategy {
+export class MomentumStrategy implements IStrategy {
   private setups: Map<string, MomentumSetup> = new Map();
 
   constructor(

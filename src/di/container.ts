@@ -29,9 +29,9 @@ import { DatabaseManager, db } from '../infrastructure/persistence/DatabaseManag
 import { MarketDataManager } from '../app/services/MarketDataManager';
 
 // Core (Domain Strategies)
-import { StrategyEngine } from '../domain/strategies/StrategyEngine';
+import { MomentumStrategy } from '../domain/strategies/MomentumStrategy';
 import { TradeExecutor } from '../app/services/TradeExecutor';
-import { BacktestEngine } from '../app/BacktestEngine';
+import { BacktestRunner } from '../app/BacktestRunner';
 
 // App Layer (Clean Architecture)
 import { TradingBot } from '../app/TradingBot';
@@ -67,7 +67,7 @@ container.bind<IIndicators>(TYPES.IIndicators).to(TechnicalIndicators).inSinglet
 container.bind<IRiskManager>(TYPES.IRiskManager).to(RiskManager).inSingletonScope();
 
 // Bind IStrategy to StrategyEngine (momentum pullback strategy)
-container.bind<IStrategy>(TYPES.IStrategy).to(StrategyEngine).inSingletonScope();
+container.bind<IStrategy>(TYPES.IStrategy).to(MomentumStrategy).inSingletonScope();
 
 // ============================================
 // SINGLETONS (Services & Config)
@@ -90,10 +90,10 @@ container.bind<PullbackScanner>(TYPES.PullbackScanner).to(PullbackScanner);
 container.bind<RegimeDetector>(TYPES.RegimeDetector).to(RegimeDetector);
 
 // Core
-container.bind<StrategyEngine>(TYPES.StrategyEngine).to(StrategyEngine);
+container.bind<MomentumStrategy>(TYPES.StrategyEngine).to(MomentumStrategy);
 container.bind<TradeExecutor>(TYPES.TradeExecutor).to(TradeExecutor);
 container.bind<MarketDataManager>(TYPES.MarketDataManager).to(MarketDataManager);
 container.bind<TradingBot>(TYPES.TradingBot).to(TradingBot);
-container.bind<BacktestEngine>(TYPES.BacktestEngine).to(BacktestEngine);
+container.bind<BacktestRunner>(TYPES.BacktestEngine).to(BacktestRunner);
 
 export { container };
