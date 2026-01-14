@@ -4,7 +4,7 @@
  */
 
 import * as dotenv from 'dotenv';
-import { BotConfig, StrategyConfig, RiskParameters } from '../types';
+import { BotConfig, StrategyConfig, RiskParameters, FeeConfig } from '../types';
 
 dotenv.config();
 
@@ -65,12 +65,20 @@ export class ConfigManager {
 
     const risk: RiskParameters = {
       accountBalance: parseFloat(process.env.INITIAL_BALANCE || '1000'),
-      riskPerTrade: parseFloat(process.env.RISK_PER_TRADE || '0.01'),
+      // По ТЗ: 0.5% риска на сделку
+      riskPerTrade: parseFloat(process.env.RISK_PER_TRADE || '0.005'),
       maxOpenTrades: parseInt(process.env.MAX_OPEN_TRADES || '2'),
       leverage: parseInt(process.env.LEVERAGE || '2'),
       maxDailyLoss: 0.05,      // 5% max daily loss
-      maxDrawdown: 0.15,       // 15% max drawdown
-      minRR: parseFloat(process.env.MIN_RR || '1.5'),
+      // По ТЗ: контроль DD ≤ 10%
+      maxDrawdown: parseFloat(process.env.MAX_DRAWDOWN || '0.10'),
+      // По ТЗ: TP не ниже 1.2R (стратегия использует 1.4)
+      minRR: parseFloat(process.env.MIN_RR || '1.2'),
+    };
+
+    const fees: FeeConfig = {
+      maker: parseFloat(process.env.BINANCE_MAKER_FEE || '0.0002'),
+      taker: parseFloat(process.env.BINANCE_TAKER_FEE || '0.0005'),
     };
 
     return {
@@ -78,27 +86,28 @@ export class ConfigManager {
       apiSecret: process.env.BINANCE_API_SECRET || '',
       testnet: process.env.BINANCE_USE_TESTNET === 'true',
       symbols: [
-        'BTCUSDT',
+        // 'BTCUSDT',
         'BNBUSDT',
         'ETHUSDT',
         'SOLUSDT',
         'ZECUSDT',
         'TAOUSDT',
-        'XRPUSDT',
-        'DOGEUSDT',
-        'ADAUSDT',
-        'TRXUSDT',
-        'SUIUSDT',
-        'NEARUSDT',
-        'LINKUSDT',
-        'DOTUSDT',
-        'TONUSDT',
-        'AVAXUSDT',
-        'RENDERUSDT',
+        // 'XRPUSDT',
+        // 'DOGEUSDT',
+        // 'ADAUSDT',
+        // 'TRXUSDT',
+        // 'SUIUSDT',
+        // 'NEARUSDT',
+        // 'LINKUSDT',
+        // 'DOTUSDT',
+        // 'TONUSDT',
+        // 'AVAXUSDT',
+        // 'RENDERUSDT',
       ],
       timeframe: '5m',
       strategy,
-      risk
+      risk,
+      fees
     };
   }
 

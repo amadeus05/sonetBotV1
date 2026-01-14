@@ -22,6 +22,9 @@ const MAX_TOTAL_RISK_EXPOSURE_RATIO = 0.08;    // Максимум 6% от ба�
                                                // Если риск на сделку 1%, это позволит открыть макс 6 сделок.
                                                // Если риск на сделку 2%, это позволит открыть макс 3 сделки.
 
+// DD control tiers (keeps Max DD <= 10% more stable in practice)
+const DD_TIER_REDUCE_RISK_PCT = 8; // at/above 8% DD -> reduce risk and max concurrent trades
+
 export class RiskManager {
   private currentBalance: number;
   private dailyStartBalance: number; // Баланс на начало дня для фиксации лимита потерь
@@ -59,6 +62,7 @@ export class RiskManager {
       candles: Candle[] // candles parameter is not used in the current implementation, but kept for interface consistency
     ): PositionSizeCalculation {
       const riskParams = config.getRiskConfig();
+      const effectiveRiskPerTrade = this.getEffectiveRiskPerTrade();
   
       // Calculate stop loss distance
       const slDistance = Math.abs(signal.entry - signal.stopLoss);
@@ -78,7 +82,7 @@ export class RiskManager {
       }
 
       // Calculate risk amount in USD (например $1000 * 1% = $10)
-      const riskAmount = this.currentBalance * riskParams.riskPerTrade;
+      const riskAmount = this.currentBalance * effectiveRiskPerTrade;
   
       // This `sizeUSD` is the NOTIONAL value of the position (объем сделки в USD)
       // Size = Risk Amount / SL %
@@ -101,7 +105,7 @@ export class RiskManager {
         size: adjustedSize, // Номинальный объем позиции в USD
         quantity: adjustedQuantity, // Количество базового актива
         risk: riskAmount * confidenceMultiplier,
-        riskPercent: riskParams.riskPerTrade * 100 * confidenceMultiplier,
+        riskPercent: effectiveRiskPerTrade * 100 * confidenceMultiplier,
         leverage: riskParams.leverage
       };
   }
@@ -158,12 +162,13 @@ export class RiskManager {
   public canOpenPosition(): boolean {
     const riskParams = config.getRiskConfig();
     const openPositions = this.getActivePositions(); 
+    const effectiveMaxOpenTrades = this.getEffectiveMaxOpenTrades();
 
     // Check max open trades
-    if (openPositions.length >= riskParams.maxOpenTrades) {
+    if (openPositions.length >= effectiveMaxOpenTrades) {
       logger.warn('RiskManager', 'Max open trades reached', { 
         current: openPositions.length, 
-        max: riskParams.maxOpenTrades 
+        max: effectiveMaxOpenTrades 
       });
       return false;
     }
@@ -276,10 +281,28 @@ export class RiskManager {
   public validateSignal(signal: TradingSignal): { valid: boolean; reason?: string } {
     const riskParams = config.getRiskConfig(); 
     const notionalSize = signal.positionSize; // Используем уже рассчитанный размер
+    const feeCfg = config.getConfig().fees;
 
     // 1. Проверка на минимальный номинальный размер позиции
     if (notionalSize < 10) { 
         return { valid: false, reason: `Position notional size too small (${notionalSize.toFixed(2)} USD). Minimum 10 USD.` };
+    }
+
+    // 1.1 Fee-aware: стоп должен перекрывать хотя бы 2x комиссии (round-trip taker)
+    // По ТЗ: "INVALIDATED if SL < fees × 2"
+    const slDistance = Math.abs(signal.entry - signal.stopLoss);
+    const slPercent = signal.entry > 0 ? (slDistance / signal.entry) : 0;
+    const roundTripFeeRate = feeCfg.taker * 2;
+
+    if (!Number.isFinite(slPercent) || slPercent <= 0) {
+      return { valid: false, reason: 'Bad SL percent (non-finite or zero)' };
+    }
+
+    if (slPercent < roundTripFeeRate) {
+      return {
+        valid: false,
+        reason: `SL too tight vs fees (SL ${(slPercent * 100).toFixed(3)}% < 2xFee ${(roundTripFeeRate * 100).toFixed(3)}%)`
+      };
     }
 
     // 2. Расчет маржи, необходимой для этой новой сделки
@@ -347,6 +370,30 @@ export class RiskManager {
     }
 
     return { valid: true };
+  }
+
+  /**
+   * Effective risk per trade with drawdown-aware throttling.
+   * - Base risk is config.risk.riskPerTrade (0.5% by default in ConfigManager)
+   * - At >= 8% DD reduce by 50% to stabilize equity curve
+   */
+  private getEffectiveRiskPerTrade(): number {
+    const base = config.getRiskConfig().riskPerTrade;
+    const dd = this.getCurrentDrawdown();
+    if (dd >= DD_TIER_REDUCE_RISK_PCT) return base * 0.5;
+    return base;
+  }
+
+  /**
+   * Effective max open trades with drawdown-aware throttling.
+   * - Never exceeds config.risk.maxOpenTrades
+   * - At >= 8% DD -> cap to 1 trade simultaneously (keeps DD tighter)
+   */
+  private getEffectiveMaxOpenTrades(): number {
+    const base = config.getRiskConfig().maxOpenTrades;
+    const dd = this.getCurrentDrawdown();
+    if (dd >= DD_TIER_REDUCE_RISK_PCT) return Math.min(base, 1);
+    return base;
   }
 
   /**

@@ -22,13 +22,20 @@ import { db } from '../services/DatabaseManager';
 import { logger } from '../services/Logger';
 import { Helpers } from '../utils/Helpers';
 import { config } from '../config/ConfigManager';
+import { TechnicalIndicators } from '../utils/TechnicalIndicators';
 import * as fs from 'fs';
 import * as path from 'path';
 
 // --- CONSTANTS ---
-const BINANCE_TAKER_FEE = 0.0005; // 0.05%
 const SLIPPAGE_PERCENT = 0.0002;  // 0.02% base slippage
-const STRATEGY_LOOKBACK = 1000;   // History window
+const STRATEGY_LOOKBACK = 300;   // History window
+
+// Strategy regime filters (must match StrategyEngine RR-driven constraints)
+const ATR_PERIOD = 14;
+const ATR_AVG_PERIOD = 50;
+const VOLUME_SMA_PERIOD = 20;
+const ATR_FILTER_MULT = 1.05;
+const VOLUME_FILTER_MULT = 1.1;
 
 // === ANTI-COMPOUND MODE ===
 // Set to true for realistic backtests (fixed position sizing based on initial balance)
@@ -50,6 +57,10 @@ export class BacktestEngine {
 
     constructor() {
         this.binance = new BinanceService();
+    }
+
+    private takerFee(): number {
+        return config.getConfig().fees?.taker ?? 0.0005;
     }
 
     public async run(backtestConfig: BacktestConfig): Promise<BacktestResult> {
@@ -139,6 +150,7 @@ export class BacktestEngine {
                 for (const symbol of backtestConfig.symbols) {
                     if (this.activePositions.length >= maxOpenTrades) break;
                     if (this.activePositions.some(p => p.symbol === symbol)) continue;
+                    if (!riskManager.canOpenPosition()) break;
 
                     const candle = currentCandlesSnapshot[symbol]; // current candle i (OPEN event)
                     const candleIndex = cursor[symbol];            // index of candle i
@@ -161,6 +173,9 @@ export class BacktestEngine {
                         // Entry at OPEN of current candle i (which is i = prevIndex+1)
                         const prevCandle = marketData[symbol][prevIndex];
                         this.executeEntry(signal, candle, backtestConfig, startTickEquity, prevCandle);
+                    } else {
+                        // TEMP DEBUG: Log rejections
+                        // console.log(`[NO SIGNAL] ${symbol} @ ${new Date(historicalSlice.at(-1)!.timestamp).toISOString()}`);
                     }
                 }
             }
@@ -175,23 +190,37 @@ export class BacktestEngine {
                 // --- RULE: No exit in the same candle it opened ---
                 if (candle.timestamp <= position.openTime) continue;
 
+                // Cache remaining notional BEFORE exit logic mutates the position (partials / final close)
+                const notionalBeforeExit = (position.remainingSize ?? position.size);
+
+                // NOTE: Regime filter (ATR/Volume) is ENTRY-ONLY filter.
+                // Once in position, we don't force-exit due to regime change.
+                // Exit is handled by SL/TP/Trailing only.
+
                 const result = this.checkPositionExit(position, candle);
 
                 if (result) {
                     this.activePositions.splice(j, 1);
                     this.closedTrades.push(result);
 
-                    const marginReleased = position.size / position.leverage;
+                    const marginReleased = notionalBeforeExit / position.leverage;
                     this.lockedMargin -= marginReleased;
 
                     // Net PnL already includes fees in this implementation
-                    const cashReturn = marginReleased + result.position.pnl!;
+                    // IMPORTANT: with partial exits, realizedPnL was already credited earlier.
+                    // So for cashflow at final close we only return remaining-leg PnL (+ released margin).
+                    const cashPnLForClose = (result.position.meta?.cashPnLForClose ?? result.position.pnl) as number;
+                    const cashReturn = marginReleased + cashPnLForClose;
                     this.freeBalance += cashReturn;
                     this.walletBalance = this.freeBalance + this.lockedMargin;
 
                     const pnlStr = Helpers.formatCurrency(result.position.pnl!);
                     const emoji = result.won ? '✅' : '❌';
                     console.log(`\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} | Reason: ${result.position.exitReason}`);
+                }
+                else {
+                    // Update trailing stop and other management AFTER exit checks (conservative bar-by-bar)
+                    this.updatePositionManagement(position, candle);
                 }
             }
 
@@ -239,7 +268,7 @@ export class BacktestEngine {
         const leverage = config.risk.leverage;
         const positionSizeUSDT = signal.positionSize; // Already calculated by RiskManager based on current balance
         const marginRequired = positionSizeUSDT / leverage;
-        const entryFee = positionSizeUSDT * BINANCE_TAKER_FEE;
+        const entryFee = positionSizeUSDT * this.takerFee();
 
         if (this.freeBalance < (marginRequired + entryFee)) {
             console.log(`⚠️ Entry skipped: Insufficient balance for ${signal.symbol}. Needs ${Helpers.formatCurrency(marginRequired + entryFee)}`);
@@ -249,9 +278,23 @@ export class BacktestEngine {
         // Global risk check
         let currentRiskExposure = 0;
         for (const pos of this.activePositions) {
-            currentRiskExposure += (Math.abs(pos.entry - pos.stopLoss) / pos.entry) * pos.size;
+            const notional = (pos.remainingSize ?? pos.size);
+            currentRiskExposure += (Math.abs(pos.entry - pos.stopLoss) / pos.entry) * notional;
         }
-        const newTradeRisk = (Math.abs(entryPrice - signal.stopLoss) / entryPrice) * positionSizeUSDT;
+
+        // --- RR-driven execution: recompute SL/TP/TP1 from actual fill price using volatility distance ---
+        const meta = (signal.metadata ?? {}) as any;
+        const stopDistance = Number.isFinite(meta.stopDistance) ? meta.stopDistance : Math.abs(signal.entry - signal.stopLoss);
+        const rr = Number.isFinite(meta.rr) ? meta.rr : 1.4;
+        const tp1R = Number.isFinite(meta.tp1R) ? meta.tp1R : 1.0;
+        const tp1Fraction = Number.isFinite(meta.tp1Fraction) ? meta.tp1Fraction : 0.7;
+        const trailingDistance = Number.isFinite(meta.trailingDistance) ? meta.trailingDistance : stopDistance;
+
+        const stopLoss = isLong ? entryPrice - stopDistance : entryPrice + stopDistance;
+        const takeProfit = isLong ? entryPrice + (stopDistance * rr) : entryPrice - (stopDistance * rr);
+        const tp1Price = isLong ? entryPrice + (stopDistance * tp1R) : entryPrice - (stopDistance * tp1R);
+
+        const newTradeRisk = (Math.abs(entryPrice - stopLoss) / entryPrice) * positionSizeUSDT;
         if ((currentRiskExposure + newTradeRisk) > currentEquity * this.maxRiskExposureRatio) return;
 
         const position: Position = {
@@ -262,8 +305,21 @@ export class BacktestEngine {
             size: positionSizeUSDT,
             quantity: positionSizeUSDT / entryPrice,
             leverage: leverage,
-            stopLoss: signal.stopLoss,
-            takeProfit: signal.takeProfit,
+            stopLoss,
+            takeProfit,
+            initialSize: positionSizeUSDT,
+            remainingSize: positionSizeUSDT,
+            initialStopLoss: stopLoss,
+            tp1Price,
+            tp1Fraction,
+            partialTaken: false,
+            realizedPnL: 0,
+            trailingActive: false,
+            trailingDistance,
+            trailingStop: undefined,
+            trailingAnchor: undefined,
+            breakEvenPrice: entryPrice,
+            meta: { ...meta },
             openTime: currentCandle.timestamp,
             status: PositionStatus.OPEN,
             tags: signal.tags
@@ -287,6 +343,17 @@ export class BacktestEngine {
         let exitPrice = 0;
         let isLiquidation = false;
 
+        const notionalRemaining = (position.remainingSize ?? position.size);
+        if (notionalRemaining <= 0) return null;
+
+        // Effective stop includes trailing stop if active (but trailing is updated only after the candle closes)
+        let effectiveStop = position.stopLoss;
+        if (position.trailingActive && Number.isFinite(position.trailingStop)) {
+            effectiveStop = isLong
+                ? Math.max(effectiveStop, position.trailingStop!)
+                : Math.min(effectiveStop, position.trailingStop!);
+        }
+
         // 1. LIQUIDATION CHECK (Estimated)
         const maintenanceMargin = 0.005; // 0.5%
         const liqPriceLong = position.entry * (1 - (1 / position.leverage) + maintenanceMargin);
@@ -305,30 +372,46 @@ export class BacktestEngine {
 
         // 2. SL / TP (Standard with SL priority)
         if (!exitReason) {
-            const hitSL_Long = currentCandle.low <= position.stopLoss;
+            const hitSL_Long = currentCandle.low <= effectiveStop;
             const hitTP_Long = currentCandle.high >= position.takeProfit;
-            const hitSL_Short = currentCandle.high >= position.stopLoss;
+            const hitSL_Short = currentCandle.high >= effectiveStop;
             const hitTP_Short = currentCandle.low <= position.takeProfit;
 
             if (isLong) {
                 if (hitSL_Long) {
                     exitReason = TradeExitReason.STOP_LOSS;
-                    exitPrice = position.stopLoss * (1 - SLIPPAGE_PERCENT);
-                }
-                else if (hitTP_Long) {
-                    exitReason = TradeExitReason.TAKE_PROFIT;
-                    // TP fill is also subject to adverse slippage for market execution
-                    exitPrice = position.takeProfit * (1 - SLIPPAGE_PERCENT);
+                    exitPrice = effectiveStop * (1 - SLIPPAGE_PERCENT);
                 }
             } else {
                 if (hitSL_Short) {
                     exitReason = TradeExitReason.STOP_LOSS;
-                    exitPrice = position.stopLoss * (1 + SLIPPAGE_PERCENT);
+                    exitPrice = effectiveStop * (1 + SLIPPAGE_PERCENT);
                 }
-                else if (hitTP_Short) {
-                    exitReason = TradeExitReason.TAKE_PROFIT;
-                    exitPrice = position.takeProfit * (1 + SLIPPAGE_PERCENT);
-                }
+            }
+        }
+
+        // 2.1 Partial exit at 1R (70%) - only if SL not hit in this candle (SL priority)
+        if (!exitReason && !position.partialTaken && Number.isFinite(position.tp1Price)) {
+            const tp1 = position.tp1Price!;
+            const hitTP1_Long = currentCandle.high >= tp1;
+            const hitTP1_Short = currentCandle.low <= tp1;
+
+            if ((isLong && hitTP1_Long) || (!isLong && hitTP1_Short)) {
+                this.executePartialTP1(position, currentCandle);
+                return null; // position remains open
+            }
+        }
+
+        // 2.2 Final TP (1.4R) for remaining - after TP1 logic
+        if (!exitReason) {
+            const hitTP_Long = currentCandle.high >= position.takeProfit;
+            const hitTP_Short = currentCandle.low <= position.takeProfit;
+            if (isLong && hitTP_Long) {
+                exitReason = TradeExitReason.TAKE_PROFIT;
+                exitPrice = position.takeProfit * (1 - SLIPPAGE_PERCENT);
+            } else if (!isLong && hitTP_Short) {
+                exitReason = TradeExitReason.TAKE_PROFIT;
+                exitPrice = position.takeProfit * (1 + SLIPPAGE_PERCENT);
             }
         }
 
@@ -337,32 +420,46 @@ export class BacktestEngine {
         // 3. RESULT CALCULATION
         let rawPnL = 0;
         let exitFee = 0;
+        const takerFee = this.takerFee();
 
         if (isLiquidation) {
-            const marginLocked = position.size / position.leverage;
+            const marginLocked = notionalRemaining / position.leverage;
             rawPnL = -marginLocked;
             exitFee = 0;
         } else {
-            const pnlResult = Helpers.calculatePnL(position.entry, exitPrice, position.size, isLong, position.leverage);
+            const pnlResult = Helpers.calculatePnL(position.entry, exitPrice, notionalRemaining, isLong, position.leverage);
             rawPnL = pnlResult.pnl;
-            const exitNotional = position.size * (exitPrice / position.entry);
-            exitFee = exitNotional * BINANCE_TAKER_FEE;
+            const exitNotional = notionalRemaining * (exitPrice / position.entry);
+            exitFee = exitNotional * takerFee;
             this.totalFeesPaid += exitFee;
         }
 
         // IMPORTANT: entry fee is already charged at entry time (freeBalance -= entryFee).
         // Do NOT subtract it again here, otherwise fees are double-counted.
-        const totalNetPnL = rawPnL - exitFee;
+        const remainingLegNetPnL = rawPnL - exitFee;
+        const realized = position.realizedPnL ?? 0;
+        const totalNetPnL = realized + remainingLegNetPnL;
 
         position.closeTime = currentCandle.timestamp;
         position.closePrice = exitPrice;
         position.pnl = totalNetPnL;
-        const marginUsed = position.size / position.leverage;
+        const marginUsed = (position.initialSize ?? position.size) / position.leverage;
         position.pnlPercent = isLiquidation ? -100 : (totalNetPnL / marginUsed) * 100;
         position.status = PositionStatus.CLOSED;
         position.exitReason = isLiquidation ? TradeExitReason.STOP_LOSS : exitReason;
+        position.remainingSize = 0;
+        position.meta = {
+            ...(position.meta ?? {}),
+            realizedPnL: realized,
+            remainingLegNetPnL,
+            cashPnLForClose: remainingLegNetPnL,
+        };
 
-        const rr = isLiquidation ? 0 : Helpers.calculateRR(position.entry, position.stopLoss, exitPrice, isLong);
+        // Achieved RR (fee-aware, supports partials): totalNetPnL / initialRisk$
+        const initialNotional = (position.initialSize ?? position.size);
+        const initialSL = position.initialStopLoss ?? position.stopLoss;
+        const initialRiskDollar = initialNotional * (Math.abs(position.entry - initialSL) / position.entry);
+        const rr = (isLiquidation || initialRiskDollar <= 0) ? 0 : (totalNetPnL / initialRiskDollar);
 
         return {
             position,
@@ -380,13 +477,143 @@ export class BacktestEngine {
             if (candle) {
                 const currentPrice = priceField === 'open' ? candle.open : candle.close;
                 const isLong = pos.side === PositionSide.LONG;
-                const pnlData = Helpers.calculatePnL(pos.entry, currentPrice, pos.size, isLong, pos.leverage);
-                const currentNotional = pos.size * (currentPrice / pos.entry);
-                const estExitFee = currentNotional * BINANCE_TAKER_FEE;
+                const notional = (pos.remainingSize ?? pos.size);
+                const pnlData = Helpers.calculatePnL(pos.entry, currentPrice, notional, isLong, pos.leverage);
+                const currentNotional = notional * (currentPrice / pos.entry);
+                const estExitFee = currentNotional * this.takerFee();
                 equity += (pnlData.pnl - estExitFee);
             }
         }
         return equity;
+    }
+
+    private executePartialTP1(position: Position, candle: Candle): void {
+        const isLong = position.side === PositionSide.LONG;
+        const initialNotional = (position.initialSize ?? position.size);
+        const remainingNotional = (position.remainingSize ?? position.size);
+        const fraction = position.tp1Fraction ?? 0.7;
+        const partialNotional = Math.min(remainingNotional, initialNotional * fraction);
+        if (partialNotional <= 0) return;
+
+        const leverage = position.leverage;
+        const marginReleased = partialNotional / leverage;
+
+        // adverse slippage on exit (market)
+        const target = position.tp1Price!;
+        const exitPrice = isLong ? target * (1 - SLIPPAGE_PERCENT) : target * (1 + SLIPPAGE_PERCENT);
+
+        const pnlResult = Helpers.calculatePnL(position.entry, exitPrice, partialNotional, isLong, position.leverage);
+        const rawPnL = pnlResult.pnl;
+
+        const exitNotional = partialNotional * (exitPrice / position.entry);
+        const fee = exitNotional * this.takerFee();
+        this.totalFeesPaid += fee;
+
+        const net = rawPnL - fee;
+
+        // Realize partial
+        position.realizedPnL = (position.realizedPnL ?? 0) + net;
+        position.remainingSize = remainingNotional - partialNotional;
+        position.partialTaken = true;
+
+        // Release margin + credit realized PnL
+        this.lockedMargin -= marginReleased;
+        this.freeBalance += (marginReleased + net);
+        this.walletBalance = this.freeBalance + this.lockedMargin;
+
+        // Move stop to BE, activate trailing
+        position.stopLoss = position.breakEvenPrice ?? position.entry;
+        position.trailingActive = true;
+        // Initialize trailing on next candle management update (avoid intra-candle look-ahead)
+        if (!Number.isFinite(position.trailingAnchor)) {
+            position.trailingAnchor = position.entry;
+        }
+        if (!Number.isFinite(position.trailingStop)) {
+            position.trailingStop = position.stopLoss;
+        }
+    }
+
+    private updatePositionManagement(position: Position, candle: Candle): void {
+        // Update trailing AFTER we already checked exits for this candle (conservative, avoids look-ahead)
+        if (!position.trailingActive || !Number.isFinite(position.trailingDistance)) return;
+        const isLong = position.side === PositionSide.LONG;
+
+        const anchor = Number.isFinite(position.trailingAnchor)
+            ? position.trailingAnchor!
+            : position.entry;
+
+        const newAnchor = isLong ? Math.max(anchor, candle.high) : Math.min(anchor, candle.low);
+        position.trailingAnchor = newAnchor;
+
+        const dist = position.trailingDistance!;
+        const newTrail = isLong ? (newAnchor - dist) : (newAnchor + dist);
+        position.trailingStop = newTrail;
+    }
+
+    private computeRegimeFilters(candles: Candle[]): { atrOk: boolean; volOk: boolean } {
+        if (!candles || candles.length < 260) return { atrOk: false, volOk: false };
+
+        const atrSeries = TechnicalIndicators.atr(candles, ATR_PERIOD);
+        if (atrSeries.length < ATR_AVG_PERIOD) return { atrOk: false, volOk: false };
+
+        const currentATR = atrSeries[atrSeries.length - 1];
+        const atrAvg50 = TechnicalIndicators.sma(atrSeries.slice(-ATR_AVG_PERIOD), ATR_AVG_PERIOD)[0];
+        const atrOk = currentATR >= (atrAvg50 * ATR_FILTER_MULT);
+
+        const volSma = TechnicalIndicators.volumeAverage(candles, VOLUME_SMA_PERIOD);
+        if (volSma.length === 0) return { atrOk, volOk: false };
+
+        const volSma20 = volSma[volSma.length - 1];
+        const last = candles[candles.length - 1];
+        const volRatio = volSma20 > 0 ? (last.volume / volSma20) : 0;
+        const volOk = volRatio >= VOLUME_FILTER_MULT;
+
+        return { atrOk, volOk };
+    }
+
+    private forceExitOnOpen(position: Position, candle: Candle, reason: TradeExitReason): TradeResult {
+        const isLong = position.side === PositionSide.LONG;
+        const notionalRemaining = (position.remainingSize ?? position.size);
+        const openFill = isLong ? candle.open * (1 - SLIPPAGE_PERCENT) : candle.open * (1 + SLIPPAGE_PERCENT);
+
+        const pnlResult = Helpers.calculatePnL(position.entry, openFill, notionalRemaining, isLong, position.leverage);
+        const rawPnL = pnlResult.pnl;
+
+        const exitNotional = notionalRemaining * (openFill / position.entry);
+        const fee = exitNotional * this.takerFee();
+        this.totalFeesPaid += fee;
+        const remainingLegNetPnL = rawPnL - fee;
+
+        const realized = position.realizedPnL ?? 0;
+        const totalNetPnL = realized + remainingLegNetPnL;
+
+        position.closeTime = candle.timestamp;
+        position.closePrice = openFill;
+        position.pnl = totalNetPnL;
+        const marginUsed = (position.initialSize ?? position.size) / position.leverage;
+        position.pnlPercent = marginUsed > 0 ? (totalNetPnL / marginUsed) * 100 : 0;
+        position.status = PositionStatus.CLOSED;
+        position.exitReason = reason;
+        position.remainingSize = 0;
+        position.meta = {
+            ...(position.meta ?? {}),
+            realizedPnL: realized,
+            remainingLegNetPnL,
+            cashPnLForClose: remainingLegNetPnL,
+        };
+
+        const initialNotional = (position.initialSize ?? position.size);
+        const initialSL = position.initialStopLoss ?? position.stopLoss;
+        const initialRiskDollar = initialNotional * (Math.abs(position.entry - initialSL) / position.entry);
+        const rr = initialRiskDollar > 0 ? (totalNetPnL / initialRiskDollar) : 0;
+
+        return {
+            position,
+            won: totalNetPnL > 0,
+            rr,
+            holdTime: position.closeTime - position.openTime,
+            slippage: Math.abs(candle.open - openFill)
+        };
     }
 
     private getSnapshot(data: Record<string, Candle[]>, cursor: Record<string, number>, timestamp: number): Record<string, Candle> {
