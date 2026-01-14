@@ -134,6 +134,7 @@ export interface Position {
   side: PositionSide;
   entry: number;
   size: number;
+  quantity: number;
   leverage: number;
   stopLoss: number;
   takeProfit: number;
@@ -263,7 +264,7 @@ export interface ExchangeOrder {
   orderId: string;
   symbol: string;
   side: 'BUY' | 'SELL';
-  type: 'MARKET' | 'LIMIT' | 'STOP_LOSS' | 'TAKE_PROFIT';
+  type: 'MARKET' | 'LIMIT' | 'STOP_LOSS' | 'TAKE_PROFIT' | 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
   quantity: number;
   price?: number;
   stopPrice?: number;

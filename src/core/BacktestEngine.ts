@@ -242,6 +242,7 @@ export class BacktestEngine {
             side: signal.type === 'LONG' ? PositionSide.LONG : PositionSide.SHORT,
             entry: signal.entry,
             size: positionSizeUSDT,
+            quantity: positionSizeUSDT / signal.entry, // Calculated based on notional size
             leverage: leverage,
             stopLoss: signal.stopLoss,
             takeProfit: signal.takeProfit,
@@ -447,13 +448,13 @@ export class BacktestEngine {
         const allCandles: Candle[] = [];
         let currentTime = startTime;
         const klineLimit = 1000;
-        
+
         // Перевод таймфрейма в мс для итерации
-        let timeframeMs = 60000; 
+        let timeframeMs = 60000;
         if (timeframe === '5m') timeframeMs = 300000;
         if (timeframe === '15m') timeframeMs = 900000;
         if (timeframe === '1h') timeframeMs = 3600000;
-        
+
         while (currentTime < endTime) {
             await Helpers.sleep(50);
             const candles = await this.binance.getCandles(symbol, timeframe, klineLimit, currentTime);

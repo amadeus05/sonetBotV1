@@ -48,10 +48,10 @@ export class BinanceService {
   // --- PAPER TRADING STATE ---
   private isPaperTrading: boolean = false;
   private paperState = {
-      balance: 1000, 
-      positions: new Map<string, PaperPosition>(),
-      orders: [] as PaperOrder[],
-      trades: [] as any[]
+    balance: 1000,
+    positions: new Map<string, PaperPosition>(),
+    orders: [] as PaperOrder[],
+    trades: [] as any[]
   };
 
   // Cache for Step Sizes (e.g. BTCUSDT -> 0.001, 1000PEPEUSDT -> 1)
@@ -68,10 +68,10 @@ export class BinanceService {
 
     // Detect Paper Trading Mode
     if (!this.apiKey || !this.apiSecret || this.apiKey.trim() === '') {
-        this.isPaperTrading = true;
-        this.paperState.balance = botConfig.risk.accountBalance || 1000;
-        logger.warn('BinanceService', '⚠️ API Keys missing. Switching to PAPER TRADING (SIMULATION) Mode.');
-        logger.info('BinanceService', `💰 Paper Balance: $${this.paperState.balance}`);
+      this.isPaperTrading = true;
+      this.paperState.balance = botConfig.risk.accountBalance || 1000;
+      logger.warn('BinanceService', '⚠️ API Keys missing. Switching to PAPER TRADING (SIMULATION) Mode.');
+      logger.info('BinanceService', `💰 Paper Balance: $${this.paperState.balance}`);
     }
 
     if (botConfig.testnet) {
@@ -92,7 +92,7 @@ export class BinanceService {
 
     // Remove auth header for paper mode
     if (this.isPaperTrading) {
-        delete this.client.defaults.headers['X-MBX-APIKEY'];
+      delete this.client.defaults.headers['X-MBX-APIKEY'];
     }
 
     logger.info('BinanceService', `Initialized (${this.baseURL})`);
@@ -168,62 +168,62 @@ export class BinanceService {
   private async executePaperTrade(symbol: string, side: 'BUY' | 'SELL', qty: number, price: number, reason: string = 'MARKET') {
     const cost = qty * price;
     const fee = cost * 0.0005; // 0.05% taker fee simulation
-    
+
     let pos = this.paperState.positions.get(symbol);
     const isLong = side === 'BUY';
-    
+
     // Update Balance (Fee)
     this.paperState.balance -= fee;
 
     // Log Trade for History
     this.paperState.trades.push({
-        id: Date.now(),
-        orderId: `paper-${Date.now()}`,
-        symbol,
-        side,
-        price,
-        qty,
-        realizedPnl: 0,
-        time: Date.now(),
-        commission: fee,
-        maker: false
+      id: Date.now(),
+      orderId: `paper-${Date.now()}`,
+      symbol,
+      side,
+      price,
+      qty,
+      realizedPnl: 0,
+      time: Date.now(),
+      commission: fee,
+      maker: false
     });
 
     logger.info('PAPER', `📝 Executed ${side} ${symbol} @ ${price} (${reason})`);
 
     if (!pos) {
-        // Open new position
-        this.paperState.positions.set(symbol, {
-            symbol,
-            amt: isLong ? qty : -qty,
-            entryPrice: price,
-            leverage: 1
-        });
+      // Open new position
+      this.paperState.positions.set(symbol, {
+        symbol,
+        amt: isLong ? qty : -qty,
+        entryPrice: price,
+        leverage: 1
+      });
     } else {
-        // Closing or Reversing
-        if ((pos.amt > 0 && !isLong) || (pos.amt < 0 && isLong)) {
-            // Closing logic
-            const pnl = (price - pos.entryPrice) * qty * (pos.amt > 0 ? 1 : -1);
-            this.paperState.balance += pnl;
-            
-            // Update trade history PnL
-            this.paperState.trades[this.paperState.trades.length - 1].realizedPnl = pnl;
+      // Closing or Reversing
+      if ((pos.amt > 0 && !isLong) || (pos.amt < 0 && isLong)) {
+        // Closing logic
+        const pnl = (price - pos.entryPrice) * qty * (pos.amt > 0 ? 1 : -1);
+        this.paperState.balance += pnl;
 
-            logger.info('PAPER', `💰 PnL Realized: ${pnl.toFixed(2)} USDT. New Balance: ${this.paperState.balance.toFixed(2)}`);
+        // Update trade history PnL
+        this.paperState.trades[this.paperState.trades.length - 1].realizedPnl = pnl;
 
-            if (Math.abs(pos.amt) - qty <= 0.0000001) {
-                this.paperState.positions.delete(symbol);
-                this.paperState.orders = this.paperState.orders.filter(o => o.symbol !== symbol);
-            } else {
-                pos.amt = pos.amt > 0 ? pos.amt - qty : pos.amt + qty;
-            }
+        logger.info('PAPER', `💰 PnL Realized: ${pnl.toFixed(2)} USDT. New Balance: ${this.paperState.balance.toFixed(2)}`);
+
+        if (Math.abs(pos.amt) - qty <= 0.0000001) {
+          this.paperState.positions.delete(symbol);
+          this.paperState.orders = this.paperState.orders.filter(o => o.symbol !== symbol);
         } else {
-            // Averaging
-            const totalCost = (Math.abs(pos.amt) * pos.entryPrice) + (qty * price);
-            const totalQty = Math.abs(pos.amt) + qty;
-            pos.entryPrice = totalCost / totalQty;
-            pos.amt = isLong ? totalQty : -totalQty;
+          pos.amt = pos.amt > 0 ? pos.amt - qty : pos.amt + qty;
         }
+      } else {
+        // Averaging
+        const totalCost = (Math.abs(pos.amt) * pos.entryPrice) + (qty * price);
+        const totalQty = Math.abs(pos.amt) + qty;
+        pos.entryPrice = totalCost / totalQty;
+        pos.amt = isLong ? totalQty : -totalQty;
+      }
     }
   }
 
@@ -244,35 +244,35 @@ export class BinanceService {
       let positionClosed = false;
 
       for (const order of openOrders) {
-          if (order.type === 'STOP_MARKET') {
-              const triggered = (pos.amt > 0 && currentPrice <= order.stopPrice) || (pos.amt < 0 && currentPrice >= order.stopPrice);
-              if (triggered) {
-                  await this.executePaperTrade(symbol, order.side, Math.abs(pos.amt), currentPrice, 'STOP_LOSS');
-                  positionClosed = true;
-                  break; 
-              }
+        if (order.type === 'STOP_MARKET') {
+          const triggered = (pos.amt > 0 && currentPrice <= order.stopPrice) || (pos.amt < 0 && currentPrice >= order.stopPrice);
+          if (triggered) {
+            await this.executePaperTrade(symbol, order.side, Math.abs(pos.amt), currentPrice, 'STOP_LOSS');
+            positionClosed = true;
+            break;
           }
-          else if (order.type === 'TAKE_PROFIT_MARKET') {
-              const triggered = (pos.amt > 0 && currentPrice >= order.stopPrice) || (pos.amt < 0 && currentPrice <= order.stopPrice);
-              if (triggered) {
-                  await this.executePaperTrade(symbol, order.side, Math.abs(pos.amt), currentPrice, 'TAKE_PROFIT');
-                  positionClosed = true;
-                  break;
-              }
+        }
+        else if (order.type === 'TAKE_PROFIT_MARKET') {
+          const triggered = (pos.amt > 0 && currentPrice >= order.stopPrice) || (pos.amt < 0 && currentPrice <= order.stopPrice);
+          if (triggered) {
+            await this.executePaperTrade(symbol, order.side, Math.abs(pos.amt), currentPrice, 'TAKE_PROFIT');
+            positionClosed = true;
+            break;
           }
+        }
       }
 
       if (positionClosed) {
-          return { positionAmt: 0, entryPrice: 0, unrealizedProfit: 0 };
+        return { positionAmt: 0, entryPrice: 0, unrealizedProfit: 0 };
       }
 
       const sideMultiplier = pos.amt > 0 ? 1 : -1;
       const pnl = (currentPrice - pos.entryPrice) * Math.abs(pos.amt) * sideMultiplier;
 
       return {
-          positionAmt: pos.amt,
-          entryPrice: pos.entryPrice,
-          unrealizedProfit: pnl
+        positionAmt: pos.amt,
+        entryPrice: pos.entryPrice,
+        unrealizedProfit: pnl
       };
     }
 
@@ -364,9 +364,9 @@ export class BinanceService {
     // --- PAPER MODE ---
     if (this.isPaperTrading) {
       return this.paperState.trades
-          .filter(t => t.symbol === symbol)
-          .sort((a, b) => b.time - a.time)
-          .slice(0, limit);
+        .filter(t => t.symbol === symbol)
+        .sort((a, b) => b.time - a.time)
+        .slice(0, limit);
     }
 
     // --- LIVE MODE ---
@@ -380,16 +380,16 @@ export class BinanceService {
       });
 
       return response.data.map((t: any) => ({
-          id: t.id,
-          orderId: t.orderId,
-          symbol: t.symbol,
-          side: t.side,
-          price: parseFloat(t.price),
-          qty: parseFloat(t.qty),
-          realizedPnl: parseFloat(t.realizedPnl),
-          commission: parseFloat(t.commission),
-          time: t.time,
-          maker: t.maker
+        id: t.id,
+        orderId: t.orderId,
+        symbol: t.symbol,
+        side: t.side,
+        price: parseFloat(t.price),
+        qty: parseFloat(t.qty),
+        realizedPnl: parseFloat(t.realizedPnl),
+        commission: parseFloat(t.commission),
+        time: t.time,
+        maker: t.maker
       }));
     } catch (error: any) {
       logger.error('BinanceService', `Failed to fetch user trades for ${symbol}`, error.message);
@@ -401,8 +401,8 @@ export class BinanceService {
    * Subscribe to Candle Streams (WebSocket)
    */
   public subscribeToCandles(
-    symbols: string[], 
-    interval: string, 
+    symbols: string[],
+    interval: string,
     callback: (data: any) => void
   ): void {
     if (this.ws) {
@@ -527,10 +527,10 @@ export class BinanceService {
     // --- PAPER MODE ---
     if (this.isPaperTrading) {
       return [{
-          asset: 'USDT',
-          free: this.paperState.balance,
-          locked: 0,
-          total: this.paperState.balance
+        asset: 'USDT',
+        free: this.paperState.balance,
+        locked: 0,
+        total: this.paperState.balance
       }];
     }
 
@@ -599,6 +599,33 @@ export class BinanceService {
   }
 
   /**
+   * Set margin type for symbol
+   */
+  public async setMarginType(symbol: string, marginType: 'ISOLATED' | 'CROSSED'): Promise<void> {
+    if (this.isPaperTrading) return;
+
+    try {
+      const timestamp = Date.now();
+      const queryString = `symbol=${symbol}&marginType=${marginType}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
+      const signature = this.generateSignature(queryString);
+
+      await this.client.post('/fapi/v1/marginType', null, {
+        params: { symbol, marginType, timestamp, recvWindow: this.recvWindow, signature }
+      });
+
+      logger.info('BinanceService', `Set margin type to ${marginType} for ${symbol}`);
+    } catch (error: any) {
+      // Ignore error -4046: "No need to change margin type."
+      if (error.response?.data?.code === -4046) {
+        logger.info('BinanceService', `Margin type already ${marginType} for ${symbol}`);
+        return;
+      }
+      logger.error('BinanceService', `Failed to set margin type for ${symbol}`, error.message);
+      throw error;
+    }
+  }
+
+  /**
    * Place market order
    */
   public async placeMarketOrder(
@@ -612,16 +639,16 @@ export class BinanceService {
     if (this.isPaperTrading) {
       const price = await this.getCurrentPrice(symbol);
       await this.executePaperTrade(symbol, side, q, price, 'ENTRY');
-      
+
       return {
-          orderId: `paper-${Date.now()}`,
-          symbol,
-          side,
-          type: 'MARKET',
-          quantity: q,
-          price: price,
-          status: 'FILLED',
-          timestamp: Date.now()
+        orderId: `paper-${Date.now()}`,
+        symbol,
+        side,
+        type: 'MARKET',
+        quantity: q,
+        price: price,
+        status: 'FILLED',
+        timestamp: Date.now()
       };
     }
 
@@ -671,24 +698,37 @@ export class BinanceService {
     // --- PAPER MODE ---
     if (this.isPaperTrading) {
       const order: PaperOrder = {
-          orderId: `paper-sl-${Date.now()}`,
-          symbol, side, type: 'STOP_MARKET',
-          origQty: q, price: 0, stopPrice: p,
-          status: 'NEW', time: Date.now()
+        orderId: `paper-sl-${Date.now()}`,
+        symbol, side, type: 'STOP_MARKET',
+        origQty: q, price: 0, stopPrice: p,
+        status: 'NEW', time: Date.now()
       };
       this.paperState.orders.push(order);
       logger.info('PAPER', `🛡️ STOP LOSS placed @ ${p}`);
-      return { ...order, quantity: q } as any;
+      return {
+        orderId: order.orderId,
+        symbol: order.symbol,
+        side: order.side,
+        type: 'STOP_LOSS',
+        quantity: q,
+        stopPrice: p,
+        status: 'NEW',
+        timestamp: order.time
+      } as any;
     }
 
     // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&priceProtect=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
-        params: { symbol, side, type: 'STOP_MARKET', quantity: q, stopPrice: p, reduceOnly: true, timestamp, recvWindow: this.recvWindow, signature }
+        params: {
+          symbol, side, type: 'STOP_MARKET', quantity: q,
+          stopPrice: p, reduceOnly: true, priceProtect: true,
+          timestamp, recvWindow: this.recvWindow, signature
+        }
       });
 
       logger.trade(symbol, `STOP LOSS order placed at ${p}`, { quantity: q });
@@ -697,7 +737,7 @@ export class BinanceService {
         orderId: response.data.orderId.toString(),
         symbol: response.data.symbol,
         side,
-        type: 'STOP_LOSS',
+        type: 'STOP_MARKET',
         quantity: q,
         stopPrice: p,
         status: response.data.status,
@@ -724,24 +764,37 @@ export class BinanceService {
     // --- PAPER MODE ---
     if (this.isPaperTrading) {
       const order: PaperOrder = {
-          orderId: `paper-tp-${Date.now()}`,
-          symbol, side, type: 'TAKE_PROFIT_MARKET',
-          origQty: q, price: 0, stopPrice: p,
-          status: 'NEW', time: Date.now()
+        orderId: `paper-tp-${Date.now()}`,
+        symbol, side, type: 'TAKE_PROFIT_MARKET',
+        origQty: q, price: 0, stopPrice: p,
+        status: 'NEW', time: Date.now()
       };
       this.paperState.orders.push(order);
       logger.info('PAPER', `💎 TAKE PROFIT placed @ ${p}`);
-      return { ...order, quantity: q } as any;
+      return {
+        orderId: order.orderId,
+        symbol: order.symbol,
+        side: order.side,
+        type: 'TAKE_PROFIT',
+        quantity: q,
+        price: p, // TP usually uses price field in the app
+        status: 'NEW',
+        timestamp: order.time
+      } as any;
     }
 
     // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&priceProtect=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
-        params: { symbol, side, type: 'TAKE_PROFIT_MARKET', quantity: q, stopPrice: p, reduceOnly: true, timestamp, recvWindow: this.recvWindow, signature }
+        params: {
+          symbol, side, type: 'TAKE_PROFIT_MARKET', quantity: q,
+          stopPrice: p, reduceOnly: true, priceProtect: true,
+          timestamp, recvWindow: this.recvWindow, signature
+        }
       });
 
       logger.trade(symbol, `TAKE PROFIT order placed at ${p}`, { quantity: q });
@@ -750,7 +803,7 @@ export class BinanceService {
         orderId: response.data.orderId.toString(),
         symbol: response.data.symbol,
         side,
-        type: 'TAKE_PROFIT',
+        type: 'TAKE_PROFIT_MARKET',
         quantity: q,
         price: p,
         status: response.data.status,
@@ -796,20 +849,20 @@ export class BinanceService {
   public async getOpenOrders(symbol?: string): Promise<ExchangeOrder[]> {
     // --- PAPER MODE ---
     if (this.isPaperTrading) {
-      const orders = symbol 
-          ? this.paperState.orders.filter(o => o.symbol === symbol) 
-          : this.paperState.orders;
-          
+      const orders = symbol
+        ? this.paperState.orders.filter(o => o.symbol === symbol)
+        : this.paperState.orders;
+
       return orders.map(o => ({
-          orderId: o.orderId,
-          symbol: o.symbol,
-          side: o.side as 'BUY' | 'SELL',
-          type: 'LIMIT',
-          quantity: o.origQty,
-          price: o.price,
-          stopPrice: o.stopPrice,
-          status: 'NEW',
-          timestamp: o.time
+        orderId: o.orderId,
+        symbol: o.symbol,
+        side: o.side as 'BUY' | 'SELL',
+        type: 'LIMIT',
+        quantity: o.origQty,
+        price: o.price,
+        stopPrice: o.stopPrice,
+        status: 'NEW',
+        timestamp: o.time
       }));
     }
 

@@ -44,6 +44,7 @@ export class DatabaseManager {
         side TEXT NOT NULL,
         entry REAL NOT NULL,
         size REAL NOT NULL,
+        quantity REAL NOT NULL DEFAULT 0,
         leverage INTEGER NOT NULL,
         stopLoss REAL NOT NULL,
         takeProfit REAL NOT NULL,
@@ -165,6 +166,14 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp);
       CREATE INDEX IF NOT EXISTS idx_candles_lookup ON historical_candles(symbol, timeframe, timestamp);
     `);
+
+    // Migration: Add quantity column if it doesn't exist (better-sqlite3)
+    const tableInfo = this.db.pragma("table_info(positions)") as any[];
+    const hasQuantity = tableInfo.some(col => col.name === 'quantity');
+    if (!hasQuantity) {
+      logger.info('Database', 'Migrating database: adding quantity column to positions table');
+      this.db.exec('ALTER TABLE positions ADD COLUMN quantity REAL NOT NULL DEFAULT 0');
+    }
   }
 
   // ============================================
@@ -174,9 +183,9 @@ export class DatabaseManager {
   public savePosition(position: Position): void {
     const stmt = this.db.prepare(`
       INSERT INTO positions (
-        id, symbol, side, entry, size, leverage, stopLoss, takeProfit,
+        id, symbol, side, entry, size, quantity, leverage, stopLoss, takeProfit,
         openTime, closeTime, closePrice, pnl, pnlPercent, status, exitReason, tags
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -185,6 +194,7 @@ export class DatabaseManager {
       position.side,
       position.entry,
       position.size,
+      position.quantity,
       position.leverage,
       position.stopLoss,
       position.takeProfit,
@@ -240,6 +250,7 @@ export class DatabaseManager {
       side: row.side,
       entry: row.entry,
       size: row.size,
+      quantity: row.quantity || 0,
       leverage: row.leverage,
       stopLoss: row.stopLoss,
       takeProfit: row.takeProfit,
@@ -311,6 +322,7 @@ export class DatabaseManager {
         side: row.side,
         entry: row.entry,
         size: row.size,
+        quantity: row.size / row.entry, // Derived for historical trades
         leverage: 1, // Not stored in trades table
         stopLoss: 0, // Not stored in trades table
         takeProfit: 0, // Not stored in trades table
@@ -382,9 +394,9 @@ export class DatabaseManager {
     const insertMany = this.db.transaction((items: Candle[]) => {
       for (const c of items) {
         insert.run(
-            symbol, timeframe, c.timestamp, 
-            c.open, c.high, c.low, c.close, c.volume, 
-            c.takerBuyBaseVolume || 0, c.openInterest || 0
+          symbol, timeframe, c.timestamp,
+          c.open, c.high, c.low, c.close, c.volume,
+          c.takerBuyBaseVolume || 0, c.openInterest || 0
         );
       }
     });
