@@ -138,6 +138,22 @@ export interface Position {
   leverage: number;
   stopLoss: number;
   takeProfit: number;
+
+  // RR-driven position management (partial exit + BE + trailing)
+  initialSize?: number;            // initial notional size in USD
+  remainingSize?: number;          // remaining notional size in USD
+  initialStopLoss?: number;        // initial SL at entry (for achieved RR calc)
+  tp1Price?: number;               // 1R level (partial exit)
+  tp1Fraction?: number;            // fraction to close at 1R (e.g. 0.7)
+  partialTaken?: boolean;
+  realizedPnL?: number;            // realized PnL from partial exits (net of fees on those exits)
+  trailingActive?: boolean;
+  trailingDistance?: number;        // ATR-based trailing distance in price units
+  trailingStop?: number;            // current trailing stop price (updated bar-by-bar)
+  trailingAnchor?: number;          // highest high (long) / lowest low (short) since trail activation
+  breakEvenPrice?: number;          // entry price (BE stop level after partial)
+
+  meta?: any;
   openTime: number;
   closeTime?: number;
   closePrice?: number;
@@ -168,6 +184,11 @@ export interface RiskParameters {
   maxDailyLoss: number;      // % max loss per day
   maxDrawdown: number;       // % max drawdown
   minRR: number;
+}
+
+export interface FeeConfig {
+  maker: number; // e.g. 0.0002 = 0.02%
+  taker: number; // e.g. 0.0005 = 0.05%
 }
 
 export interface PositionSizeCalculation {
@@ -222,6 +243,7 @@ export interface BotConfig {
   timeframe: string;
   strategy: StrategyConfig;
   risk: RiskParameters;
+  fees: FeeConfig;
 }
 
 // ============================================

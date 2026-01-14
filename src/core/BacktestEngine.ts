@@ -41,7 +41,7 @@ const VOLUME_FILTER_MULT = 1.1;
 // Set to true for realistic backtests (fixed position sizing based on initial balance)
 // Set to false for compound growth (position sizing based on current equity)
 // NOTE: For this project requirements we want compounding sizing from current equity
-const FIXED_POSITION_SIZE_MODE = false;
+const FIXED_POSITION_SIZE_MODE = true;
 
 export class BacktestEngine {
     private binance: BinanceService;
@@ -391,14 +391,14 @@ export class BacktestEngine {
         }
 
         // 2.1 Partial exit at 1R (70%) - only if SL not hit in this candle (SL priority)
-        if (!exitReason && !position.partialTaken && Number.isFinite(position.tp1Price)) {
+        if (!exitReason && !position.partialTaken && Number.isFinite(position.tp1Price) && (position.tp1Fraction ?? 0) > 0) {
             const tp1 = position.tp1Price!;
             const hitTP1_Long = currentCandle.high >= tp1;
             const hitTP1_Short = currentCandle.low <= tp1;
 
             if ((isLong && hitTP1_Long) || (!isLong && hitTP1_Short)) {
                 this.executePartialTP1(position, currentCandle);
-                return null; // position remains open
+                // Теперь мы не делаем return null сразу, а даем коду шанс закрыться по полному TP в той же свече
             }
         }
 

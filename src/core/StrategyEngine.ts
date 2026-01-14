@@ -32,22 +32,22 @@ const ATR_PERIOD = 14;
 const ATR_AVG_PERIOD = 50;
 const VOLUME_SMA_PERIOD = 20;
 
-const ATR_FILTER_MULT = 1.2;     // ATR(14) >= 120% of ATR_SMA50
-const VOLUME_FILTER_MULT = 0.9;  // Volume >= 0.9 * SMA20(volume) (relaxed for continuation)
+const ATR_FILTER_MULT = 1.6;     // ATR(14) >= 120% of ATR_SMA50
+const VOLUME_FILTER_MULT = 0.7;  // Volume >= 0.9 * SMA20(volume) (relaxed for continuation)
 
-const IMPULSE_BODY_ATR = 0.9;    // Multi-candle body sum >= 0.9 * ATR
+const IMPULSE_BODY_ATR = 1.2;    // Multi-candle body sum >= 0.9 * ATR
 const IMPULSE_LOOKBACK = 3;      // Check 2-4 candles BEFORE last
 
 const PULLBACK_MAX_DEPTH_ATR = 0.5; // max depth <= 0.5 ATR
 const PULLBACK_MAX_BARS = 5;        // duration <= 5 candles
 
 // Tight SL: 0.6–0.8 ATR (use 0.7 default)
-const SL_ATR_MULT = 0.7;
+const SL_ATR_MULT = 2.0;
 // Fixed RR
-const FIXED_RR = 1.4;
+const FIXED_RR = 4.0;
 // Partial exit
-const TP1_R = 1.0;
-const TP1_FRACTION = 0.7;
+const TP1_R = 2.0;
+const TP1_FRACTION = 0.2;
 
 export class StrategyEngine {
   private riskManager: RiskManager;
@@ -61,7 +61,7 @@ export class StrategyEngine {
   public async analyze(marketData: MarketData): Promise<TradingSignal | null> {
     const { symbol, candles } = marketData;
     if (!candles || candles.length < 260) {
-      console.log('[REJECT]', JSON.stringify({ reason: 'WARMUP', symbol, candleCount: candles?.length }));
+      // console.log('[REJECT]', JSON.stringify({ reason: 'WARMUP', symbol, candleCount: candles?.length }));
       return null; // warm-up for EMA200 + ATR averages
     }
 
@@ -75,7 +75,7 @@ export class StrategyEngine {
     const ema50 = TechnicalIndicators.ema(closes, 50);
     const ema200 = TechnicalIndicators.ema(closes, 200);
     if (ema50.length === 0 || ema200.length === 0) {
-      console.log('[REJECT]', JSON.stringify({ reason: 'EMA_FAIL', symbol }));
+      // console.log('[REJECT]', JSON.stringify({ reason: 'EMA_FAIL', symbol }));
       return null;
     }
 
@@ -91,7 +91,7 @@ export class StrategyEngine {
     const atrSeries = TechnicalIndicators.atr(candles, ATR_PERIOD);
     if (atrSeries.length < ATR_AVG_PERIOD) {
       this.resetSetup(symbol);
-      console.log('[REJECT]', JSON.stringify({ reason: 'ATR_SERIES_SHORT', symbol }));
+      // console.log('[REJECT]', JSON.stringify({ reason: 'ATR_SERIES_SHORT', symbol }));
       return null;
     }
 
@@ -101,7 +101,7 @@ export class StrategyEngine {
     const volSma = TechnicalIndicators.volumeAverage(candles, VOLUME_SMA_PERIOD);
     if (volSma.length === 0) {
       this.resetSetup(symbol);
-      console.log('[REJECT]', JSON.stringify({ reason: 'VOL_SMA_FAIL', symbol }));
+      // console.log('[REJECT]', JSON.stringify({ reason: 'VOL_SMA_FAIL', symbol }));
       return null;
     }
 
@@ -118,29 +118,29 @@ export class StrategyEngine {
       if (setup.state !== SetupState.IDLE) {
         this.debug(symbol, `INVALIDATED: FILTER_FAIL atrOk=${atrOk} volOk=${volOk}`);
       }
-      console.log('[REJECT]', JSON.stringify({
-        reason: 'REGIME_FAIL',
-        symbol,
-        atrOk,
-        volOk,
-        atr: currentATR.toFixed(4),
-        atrAvg: atrAvg50.toFixed(4),
-        volRatio: volRatio.toFixed(2),
-      }));
+      // console.log('[REJECT]', JSON.stringify({
+      //   reason: 'REGIME_FAIL',
+      //   symbol,
+      //   atrOk,
+      //   volOk,
+      //   atr: currentATR.toFixed(4),
+      //   atrAvg: atrAvg50.toFixed(4),
+      //   volRatio: volRatio.toFixed(2),
+      // }));
       this.resetSetup(symbol);
       return null;
     }
 
     // If trend is neutral -> no trades, invalidate any setups.
     if (trendDir === TrendDirection.NEUTRAL) {
-      console.log('[REJECT]', JSON.stringify({
-        reason: 'TREND_NEUTRAL',
-        symbol,
-        regimeOk,
-        atr: currentATR.toFixed(4),
-        atrAvg: atrAvg50.toFixed(4),
-        volRatio: volRatio.toFixed(2),
-      }));
+      // console.log('[REJECT]', JSON.stringify({
+      //   reason: 'TREND_NEUTRAL',
+      //   symbol,
+      //   regimeOk,
+      //   atr: currentATR.toFixed(4),
+      //   atrAvg: atrAvg50.toFixed(4),
+      //   volRatio: volRatio.toFixed(2),
+      // }));
       this.resetSetup(symbol);
       return null;
     }
@@ -150,15 +150,15 @@ export class StrategyEngine {
         // Multi-candle impulse detection (2-4 candles BEFORE last, not the last itself)
         const impulseResult = this.detectImpulse(candles, currentATR, trendDir, IMPULSE_LOOKBACK);
         if (!impulseResult.found) {
-          console.log('[REJECT]', JSON.stringify({
-            reason: 'NO_IMPULSE',
-            symbol,
-            state: 'IDLE',
-            impulseOk: false,
-            regimeOk,
-            atr: currentATR.toFixed(4),
-            volRatio: volRatio.toFixed(2),
-          }));
+          // console.log('[REJECT]', JSON.stringify({
+          //   reason: 'NO_IMPULSE',
+          //   symbol,
+          //   state: 'IDLE',
+          //   impulseOk: false,
+          //   regimeOk,
+          //   atr: currentATR.toFixed(4),
+          //   volRatio: volRatio.toFixed(2),
+          // }));
           return null;
         }
 
@@ -186,26 +186,26 @@ export class StrategyEngine {
         // Pullback must start soon; otherwise edge decays.
         setup.barsSinceImpulse++;
         if (setup.barsSinceImpulse > PULLBACK_MAX_BARS) {
-          console.log('[REJECT]', JSON.stringify({
-            reason: 'PULLBACK_TIMEOUT',
-            symbol,
-            state: 'HAVE_IMPULSE',
-            barsSinceImpulse: setup.barsSinceImpulse,
-            regimeOk,
-          }));
+          // console.log('[REJECT]', JSON.stringify({
+          //   reason: 'PULLBACK_TIMEOUT',
+          //   symbol,
+          //   state: 'HAVE_IMPULSE',
+          //   barsSinceImpulse: setup.barsSinceImpulse,
+          //   regimeOk,
+          // }));
           this.resetSetup(symbol);
           return null;
         }
 
         const pullbackOk = this.isPullbackStarting(last, prev, setup.direction);
         if (!pullbackOk) {
-          console.log('[REJECT]', JSON.stringify({
-            reason: 'NO_PULLBACK_START',
-            symbol,
-            state: 'HAVE_IMPULSE',
-            pullbackOk: false,
-            regimeOk,
-          }));
+          // console.log('[REJECT]', JSON.stringify({
+          //   reason: 'NO_PULLBACK_START',
+          //   symbol,
+          //   state: 'HAVE_IMPULSE',
+          //   pullbackOk: false,
+          //   regimeOk,
+          // }));
           return null;
         }
 
@@ -233,13 +233,13 @@ export class StrategyEngine {
           const validation = this.riskManager.validateSignal(sizedSignal);
           if (!validation.valid) {
             this.debug(symbol, `RISK_REJECTED: ${validation.reason}`);
-            console.log('[REJECT]', JSON.stringify({
-              reason: 'RISK_REJECTED',
-              symbol,
-              state: 'IN_PULLBACK',
-              riskReason: validation.reason,
-              regimeOk,
-            }));
+            // console.log('[REJECT]', JSON.stringify({
+            //   reason: 'RISK_REJECTED',
+            //   symbol,
+            //   state: 'IN_PULLBACK',
+            //   riskReason: validation.reason,
+            //   regimeOk,
+            // }));
             this.resetSetup(symbol);
             return null;
           }
@@ -255,35 +255,35 @@ export class StrategyEngine {
         setup.pullbackLow = Math.min(setup.pullbackLow, last.low);
 
         if (setup.pullbackBars > PULLBACK_MAX_BARS) {
-          console.log('[REJECT]', JSON.stringify({
-            reason: 'PULLBACK_TOO_LONG',
-            symbol,
-            state: 'IN_PULLBACK',
-            pullbackBars: setup.pullbackBars,
-            regimeOk,
-          }));
+          // console.log('[REJECT]', JSON.stringify({
+          //   reason: 'PULLBACK_TOO_LONG',
+          //   symbol,
+          //   state: 'IN_PULLBACK',
+          //   pullbackBars: setup.pullbackBars,
+          //   regimeOk,
+          // }));
           this.resetSetup(symbol);
           return null;
         }
 
         if (!this.isPullbackDepthOk(setup)) {
-          console.log('[REJECT]', JSON.stringify({
-            reason: 'PULLBACK_TOO_DEEP',
-            symbol,
-            state: 'IN_PULLBACK',
-            regimeOk,
-          }));
+          // console.log('[REJECT]', JSON.stringify({
+          //   reason: 'PULLBACK_TOO_DEEP',
+          //   symbol,
+          //   state: 'IN_PULLBACK',
+          //   regimeOk,
+          // }));
           this.resetSetup(symbol);
           return null;
         }
 
-        console.log('[REJECT]', JSON.stringify({
-          reason: 'NO_BREAKOUT',
-          symbol,
-          state: 'IN_PULLBACK',
-          pullbackBars: setup.pullbackBars,
-          regimeOk,
-        }));
+        // console.log('[REJECT]', JSON.stringify({
+        //   reason: 'NO_BREAKOUT',
+        //   symbol,
+        //   state: 'IN_PULLBACK',
+        //   pullbackBars: setup.pullbackBars,
+        //   regimeOk,
+        // }));
         return null;
       }
     }
