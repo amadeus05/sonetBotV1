@@ -251,9 +251,10 @@ export interface BacktestResult {
   totalPnLPercent: number;
   maxDrawdown: number;
   maxDrawdownPercent: number;
+  expectancy: number;
   sharpeRatio: number;
   trades: TradeResult[];
-  equityCurve: { timestamp: number; balance: number }[];
+  equityCurve: { timestamp: number; balance: number; equity: number }[];
 }
 
 // ============================================

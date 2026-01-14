@@ -27,13 +27,14 @@ import * as path from 'path';
 
 // --- CONSTANTS ---
 const BINANCE_TAKER_FEE = 0.0005; // 0.05%
-const SLIPPAGE_PERCENT = 0.0002;  // 0.02%
+const SLIPPAGE_PERCENT = 0.0002;  // 0.02% base slippage
 const STRATEGY_LOOKBACK = 1000;   // History window
 
 // === ANTI-COMPOUND MODE ===
 // Set to true for realistic backtests (fixed position sizing based on initial balance)
 // Set to false for compound growth (position sizing based on current equity)
-const FIXED_POSITION_SIZE_MODE = true;
+// NOTE: For this project requirements we want compounding sizing from current equity
+const FIXED_POSITION_SIZE_MODE = false;
 
 export class BacktestEngine {
     private binance: BinanceService;
@@ -44,8 +45,8 @@ export class BacktestEngine {
     private closedTrades: TradeResult[] = [];
     private equityCurve: { timestamp: number; balance: number, equity: number }[] = [];
     private totalFeesPaid: number = 0;
-    private maxRiskExposureRatio = 0.06;
-    private initialBalance: number = 0; // For fixed position sizing mode
+    private maxRiskExposureRatio = 0.08; // Increased slightly for flex
+    private initialBalance: number = 0;
 
     constructor() {
         this.binance = new BinanceService();
@@ -104,86 +105,51 @@ export class BacktestEngine {
             const dateStr = new Date(currentTimestamp).toISOString().split('T')[0];
 
             const currentCandlesSnapshot = this.getSnapshot(marketData, cursor, currentTimestamp);
-            const currentEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot);
+            // IMPORTANT: At candle open we must NOT use close/high/low for sizing (no look-ahead).
+            // We mark-to-market using OPEN prices for start-of-candle equity.
+            const startTickEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot, 'open');
 
             // Daily Stats
             if (currentDayStr === '') {
                 currentDayStr = dateStr;
             } else if (currentDayStr !== dateStr) {
-                const dailyPnL = currentEquity - startOfDayEquity;
+                const endOfPrevTickEquity = this.equityCurve.length > 0
+                    ? this.equityCurve[this.equityCurve.length - 1].equity
+                    : startOfDayEquity;
+                const dailyPnL = endOfPrevTickEquity - startOfDayEquity;
                 const dailyPercent = (dailyPnL / startOfDayEquity) * 100;
-                console.log(`\n📅 Day Finished: ${currentDayStr} | PnL: ${Helpers.formatCurrency(dailyPnL)} (${dailyPercent > 0 ? '+' : ''}${dailyPercent.toFixed(2)}%) | Eq: ${Helpers.formatCurrency(currentEquity)}`);
+                console.log(`\n📅 Day Finished: ${currentDayStr} | PnL: ${Helpers.formatCurrency(dailyPnL)} (${dailyPercent > 0 ? '+' : ''}${dailyPercent.toFixed(2)}%) | Eq: ${Helpers.formatCurrency(endOfPrevTickEquity)}`);
                 currentDayStr = dateStr;
-                startOfDayEquity = currentEquity;
+                startOfDayEquity = endOfPrevTickEquity;
             }
 
             if (i % 2000 === 0) {
                 const percent = ((i / timeline.length) * 100).toFixed(1);
-                process.stdout.write(`\r[${percent}%] Eq: $${currentEquity.toFixed(0)} | Free: $${this.freeBalance.toFixed(0)} | Pos: ${this.activePositions.length}  `);
+                process.stdout.write(`\r[${percent}%] Eq: $${startTickEquity.toFixed(0)} | Free: $${this.freeBalance.toFixed(0)} | Pos: ${this.activePositions.length}  `);
             }
 
-            // === CRITICAL: Use initial balance in FIXED mode to prevent unrealistic compound growth ===
-            const balanceForSizing = FIXED_POSITION_SIZE_MODE ? this.initialBalance : currentEquity;
-            (riskManager as any).currentBalance = balanceForSizing;
+            // --- UPDATE BALANCE FOR RISK MANAGER (Compounding support) ---
+            (riskManager as any).currentBalance = startTickEquity;
+            riskManager.setBacktestPositions(this.activePositions);
 
-            // A. Check Exits
-            for (let j = this.activePositions.length - 1; j >= 0; j--) {
-                const position = this.activePositions[j];
-                const candle = currentCandlesSnapshot[position.symbol];
-
-                if (!candle || candle.timestamp <= position.openTime) continue;
-
-                const result = this.checkPositionExit(position, candle);
-
-                if (result) {
-                    this.activePositions.splice(j, 1);
-                    this.closedTrades.push(result);
-
-                    // --- FEE & BALANCE LOGIC FIX ---
-                    const marginReleased = position.size / position.leverage;
-                    this.lockedMargin -= marginReleased;
-
-                    // Возвращаем на баланс: Маржа + (Чистый PnL + EntryFee который мы уже заплатили)
-                    const entryFeePaid = position.size * BINANCE_TAKER_FEE;
-                    const realizedPnL = result.position.pnl! + entryFeePaid;
-
-                    const cashReturn = marginReleased + realizedPnL;
-
-                    this.freeBalance += cashReturn;
-                    this.walletBalance = this.freeBalance + this.lockedMargin;
-
-                    const pnlStr = Helpers.formatCurrency(result.position.pnl!);
-                    const emoji = result.won ? '✅' : '❌';
-                    const durationMins = Math.round((result.holdTime) / 1000 / 60);
-                    const durationStr = durationMins > 60 ? `${(durationMins / 60).toFixed(1)}h` : `${durationMins}m`;
-
-                    // Note: pnlPercent here is ROI on margin (leveraged), not % of account equity
-                    const isLong = position.side === PositionSide.LONG;
-                    const exitPrice = position.closePrice ?? 0;
-                    const notionalRoiPct = position.entry > 0
-                        ? ((isLong ? (exitPrice - position.entry) : (position.entry - exitPrice)) / position.entry) * 100
-                        : 0;
-                    const marginRoiPct = result.position.pnlPercent ?? 0;
-                    console.log(
-                        `\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} ` +
-                        `| ROI: ${notionalRoiPct.toFixed(2)}% notional / ${marginRoiPct.toFixed(2)}% margin ` +
-                        `| Time: ${durationStr} | Reason: ${result.position.exitReason}`
-                    );
-                }
-            }
-
-            // B. Check Entries
+            // A. Generate Signals strictly on CLOSE of candle (i-1),
+            // then execute entry strictly on OPEN of current candle i.
+            // This avoids look-ahead bias when candle timestamps are openTime (Binance kline[0]).
             if (this.activePositions.length < maxOpenTrades) {
                 for (const symbol of backtestConfig.symbols) {
                     if (this.activePositions.length >= maxOpenTrades) break;
                     if (this.activePositions.some(p => p.symbol === symbol)) continue;
 
-                    const candle = currentCandlesSnapshot[symbol];
-                    const candleIndex = cursor[symbol];
-                    if (!candle || candleIndex < 200) continue;
+                    const candle = currentCandlesSnapshot[symbol]; // current candle i (OPEN event)
+                    const candleIndex = cursor[symbol];            // index of candle i
+                    const prevIndex = candleIndex - 1;             // candle (i-1) is fully closed now
 
-                    const startIndex = Math.max(0, candleIndex - STRATEGY_LOOKBACK);
-                    const historicalSlice = marketData[symbol].slice(startIndex, candleIndex + 1);
+                    // Need at least one previous candle to generate a signal
+                    if (!candle || prevIndex < 0) continue;
+                    if (prevIndex < STRATEGY_LOOKBACK) continue; // Warm-up check on closed candle
+
+                    const startIndex = Math.max(0, prevIndex - STRATEGY_LOOKBACK + 1);
+                    const historicalSlice = marketData[symbol].slice(startIndex, prevIndex + 1); // ends at (i-1)
 
                     const signal = await this.simulateStrategyAnalysis(
                         symbol,
@@ -192,13 +158,45 @@ export class BacktestEngine {
                     );
 
                     if (signal) {
-                        this.tryOpenPosition(signal, candle, backtestConfig, currentEquity);
+                        // Entry at OPEN of current candle i (which is i = prevIndex+1)
+                        const prevCandle = marketData[symbol][prevIndex];
+                        this.executeEntry(signal, candle, backtestConfig, startTickEquity, prevCandle);
                     }
                 }
             }
 
-            // C. Record Equity
-            const endTickEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot);
+            // B. Check Exits for positions opened before this candle (OHLC constraint)
+            for (let j = this.activePositions.length - 1; j >= 0; j--) {
+                const position = this.activePositions[j];
+                const candle = currentCandlesSnapshot[position.symbol];
+
+                if (!candle) continue;
+
+                // --- RULE: No exit in the same candle it opened ---
+                if (candle.timestamp <= position.openTime) continue;
+
+                const result = this.checkPositionExit(position, candle);
+
+                if (result) {
+                    this.activePositions.splice(j, 1);
+                    this.closedTrades.push(result);
+
+                    const marginReleased = position.size / position.leverage;
+                    this.lockedMargin -= marginReleased;
+
+                    // Net PnL already includes fees in this implementation
+                    const cashReturn = marginReleased + result.position.pnl!;
+                    this.freeBalance += cashReturn;
+                    this.walletBalance = this.freeBalance + this.lockedMargin;
+
+                    const pnlStr = Helpers.formatCurrency(result.position.pnl!);
+                    const emoji = result.won ? '✅' : '❌';
+                    console.log(`\n   ${emoji} Closed ${position.symbol} ${position.side} | PnL: ${pnlStr} | Reason: ${result.position.exitReason}`);
+                }
+            }
+
+            // C. Record end-of-candle equity using CLOSE prices (end of simulation step)
+            const endTickEquity = this.calculateEquity(currentTimestamp, currentCandlesSnapshot, 'close');
             this.equityCurve.push({
                 timestamp: currentTimestamp,
                 balance: this.walletBalance,
@@ -221,45 +219,64 @@ export class BacktestEngine {
 
     // --- EXECUTION LOGIC ---
 
-    private tryOpenPosition(signal: TradingSignal, candle: Candle, config: BacktestConfig, currentEquity: number) {
+    private estimateEntrySlippagePercent(prevCandle: Candle): number {
+        // Realistic-ish slippage: use previous candle range (known at entry time) + base slippage
+        const prevRangePct = prevCandle.open > 0 ? Math.abs(prevCandle.high - prevCandle.low) / prevCandle.open : 0;
+        const rangeComponent = prevRangePct * 0.10; // take 10% of the previous candle range
+        // cap to avoid insane fills on wild candles
+        return Math.min(0.003, Math.max(SLIPPAGE_PERCENT, rangeComponent));
+    }
+
+    private executeEntry(signal: TradingSignal, currentCandle: Candle, config: BacktestConfig, currentEquity: number, prevCandleForSlippage: Candle) {
+        const isLong = signal.type === 'LONG';
+
+        // --- RULE: Entry ONLY at OPEN of i+1 with slippage ---
+        const entrySlip = this.estimateEntrySlippagePercent(prevCandleForSlippage);
+        const entryPrice = isLong
+            ? currentCandle.open * (1 + entrySlip)
+            : currentCandle.open * (1 - entrySlip);
+
         const leverage = config.risk.leverage;
-        const positionSizeUSDT = signal.positionSize;
+        const positionSizeUSDT = signal.positionSize; // Already calculated by RiskManager based on current balance
         const marginRequired = positionSizeUSDT / leverage;
         const entryFee = positionSizeUSDT * BINANCE_TAKER_FEE;
 
-        if (this.freeBalance < (marginRequired + entryFee)) return;
+        if (this.freeBalance < (marginRequired + entryFee)) {
+            console.log(`⚠️ Entry skipped: Insufficient balance for ${signal.symbol}. Needs ${Helpers.formatCurrency(marginRequired + entryFee)}`);
+            return;
+        }
 
+        // Global risk check
         let currentRiskExposure = 0;
         for (const pos of this.activePositions) {
             currentRiskExposure += (Math.abs(pos.entry - pos.stopLoss) / pos.entry) * pos.size;
         }
-        const newTradeRisk = (Math.abs(signal.entry - signal.stopLoss) / signal.entry) * positionSizeUSDT;
+        const newTradeRisk = (Math.abs(entryPrice - signal.stopLoss) / entryPrice) * positionSizeUSDT;
         if ((currentRiskExposure + newTradeRisk) > currentEquity * this.maxRiskExposureRatio) return;
 
         const position: Position = {
             id: Helpers.generateId(),
             symbol: signal.symbol,
-            side: signal.type === 'LONG' ? PositionSide.LONG : PositionSide.SHORT,
-            entry: signal.entry,
+            side: isLong ? PositionSide.LONG : PositionSide.SHORT,
+            entry: entryPrice,
             size: positionSizeUSDT,
-            quantity: positionSizeUSDT / signal.entry, // Calculated based on notional size
+            quantity: positionSizeUSDT / entryPrice,
             leverage: leverage,
             stopLoss: signal.stopLoss,
             takeProfit: signal.takeProfit,
-            openTime: candle.timestamp,
+            openTime: currentCandle.timestamp,
             status: PositionStatus.OPEN,
             tags: signal.tags
         };
 
-        // Fee deducted ONCE here
         this.freeBalance -= (marginRequired + entryFee);
         this.lockedMargin += marginRequired;
         this.walletBalance = this.freeBalance + this.lockedMargin;
         this.totalFeesPaid += entryFee;
 
-        const date = new Date(candle.timestamp);
+        const date = new Date(currentCandle.timestamp);
         const readableTime = date.toISOString().replace('T', ' ').substring(0, 19);
-        console.log(`\n🔥 OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${signal.entry} (Conf: ${signal.confidence.toFixed(2)})`);
+        console.log(`\n🔥 OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${entryPrice.toFixed(2)} (Signal @ ${signal.entry.toFixed(2)} | slip ${(entrySlip * 100).toFixed(3)}%)`);
         this.activePositions.push(position);
     }
 
@@ -270,14 +287,23 @@ export class BacktestEngine {
         let exitPrice = 0;
         let isLiquidation = false;
 
-        // 1. LIQUIDATION
-        const liqPriceLong = position.entry * (1 - (1 / position.leverage) + 0.005);
-        const liqPriceShort = position.entry * (1 + (1 / position.leverage) - 0.005);
+        // 1. LIQUIDATION CHECK (Estimated)
+        const maintenanceMargin = 0.005; // 0.5%
+        const liqPriceLong = position.entry * (1 - (1 / position.leverage) + maintenanceMargin);
+        const liqPriceShort = position.entry * (1 + (1 / position.leverage) - maintenanceMargin);
 
-        if (isLong && currentCandle.low <= liqPriceLong) { exitReason = TradeExitReason.STOP_LOSS; exitPrice = liqPriceLong; isLiquidation = true; }
-        else if (!isLong && currentCandle.high >= liqPriceShort) { exitReason = TradeExitReason.STOP_LOSS; exitPrice = liqPriceShort; isLiquidation = true; }
+        if (isLong && currentCandle.low <= liqPriceLong) {
+            exitReason = TradeExitReason.STOP_LOSS;
+            exitPrice = liqPriceLong;
+            isLiquidation = true;
+        }
+        else if (!isLong && currentCandle.high >= liqPriceShort) {
+            exitReason = TradeExitReason.STOP_LOSS;
+            exitPrice = liqPriceShort;
+            isLiquidation = true;
+        }
 
-        // 2. SL / TP (Standard)
+        // 2. SL / TP (Standard with SL priority)
         if (!exitReason) {
             const hitSL_Long = currentCandle.low <= position.stopLoss;
             const hitTP_Long = currentCandle.high >= position.takeProfit;
@@ -285,11 +311,24 @@ export class BacktestEngine {
             const hitTP_Short = currentCandle.low <= position.takeProfit;
 
             if (isLong) {
-                if (hitSL_Long) { exitReason = TradeExitReason.STOP_LOSS; exitPrice = position.stopLoss * (1 - SLIPPAGE_PERCENT); }
-                else if (hitTP_Long) { exitReason = TradeExitReason.TAKE_PROFIT; exitPrice = position.takeProfit; }
+                if (hitSL_Long) {
+                    exitReason = TradeExitReason.STOP_LOSS;
+                    exitPrice = position.stopLoss * (1 - SLIPPAGE_PERCENT);
+                }
+                else if (hitTP_Long) {
+                    exitReason = TradeExitReason.TAKE_PROFIT;
+                    // TP fill is also subject to adverse slippage for market execution
+                    exitPrice = position.takeProfit * (1 - SLIPPAGE_PERCENT);
+                }
             } else {
-                if (hitSL_Short) { exitReason = TradeExitReason.STOP_LOSS; exitPrice = position.stopLoss * (1 + SLIPPAGE_PERCENT); }
-                else if (hitTP_Short) { exitReason = TradeExitReason.TAKE_PROFIT; exitPrice = position.takeProfit; }
+                if (hitSL_Short) {
+                    exitReason = TradeExitReason.STOP_LOSS;
+                    exitPrice = position.stopLoss * (1 + SLIPPAGE_PERCENT);
+                }
+                else if (hitTP_Short) {
+                    exitReason = TradeExitReason.TAKE_PROFIT;
+                    exitPrice = position.takeProfit * (1 + SLIPPAGE_PERCENT);
+                }
             }
         }
 
@@ -311,8 +350,9 @@ export class BacktestEngine {
             this.totalFeesPaid += exitFee;
         }
 
-        const entryFeePaid = position.size * BINANCE_TAKER_FEE;
-        const totalNetPnL = rawPnL - exitFee - entryFeePaid;
+        // IMPORTANT: entry fee is already charged at entry time (freeBalance -= entryFee).
+        // Do NOT subtract it again here, otherwise fees are double-counted.
+        const totalNetPnL = rawPnL - exitFee;
 
         position.closeTime = currentCandle.timestamp;
         position.closePrice = exitPrice;
@@ -333,12 +373,12 @@ export class BacktestEngine {
         };
     }
 
-    private calculateEquity(timestamp: number, currentPrices: Record<string, Candle>): number {
+    private calculateEquity(timestamp: number, currentPrices: Record<string, Candle>, priceField: 'open' | 'close' = 'close'): number {
         let equity = this.walletBalance;
         for (const pos of this.activePositions) {
             const candle = currentPrices[pos.symbol];
             if (candle) {
-                const currentPrice = candle.close;
+                const currentPrice = priceField === 'open' ? candle.open : candle.close;
                 const isLong = pos.side === PositionSide.LONG;
                 const pnlData = Helpers.calculatePnL(pos.entry, currentPrice, pos.size, isLong, pos.leverage);
                 const currentNotional = pos.size * (currentPrice / pos.entry);
@@ -377,6 +417,15 @@ export class BacktestEngine {
         const avgWin = wins.length > 0 ? grossProfit / wins.length : 0;
         const avgLoss = losses.length > 0 ? grossLoss / losses.length : 0;
         const winRate = results.length > 0 ? (wins.length / results.length) * 100 : 0;
+        const averageRR = results.length > 0
+            ? results.reduce((sum, r) => sum + (Number.isFinite(r.rr) ? r.rr : 0), 0) / results.length
+            : 0;
+
+        // Expectancy = (WinRate * AvgWin) - (LossRate * AvgLoss)
+        const lossRate = 1 - (wins.length / results.length);
+        const expectancy = results.length > 0
+            ? ((wins.length / results.length) * avgWin) - (lossRate * avgLoss)
+            : 0;
 
         const returns = this.equityCurve.map((point, i) => {
             if (i === 0) return 0;
@@ -394,13 +443,14 @@ export class BacktestEngine {
             winRate,
             averageWin: avgWin,
             averageLoss: avgLoss,
-            averageRR: 0,
+            averageRR,
             profitFactor,
             finalBalance: finalEquity,
             totalPnL,
             totalPnLPercent: (totalPnL / config.initialBalance) * 100,
             maxDrawdown: maxDD.amount,
             maxDrawdownPercent: maxDD.percent,
+            expectancy: expectancy,
             sharpeRatio: Helpers.sharpeRatio(returns),
             trades: results,
             equityCurve: this.equityCurve
@@ -513,6 +563,7 @@ export class BacktestEngine {
         console.log(`📉 Risk:`);
         console.log(`   Max DD: ${result.maxDrawdownPercent.toFixed(2)}%`);
         console.log(`   Profit Factor: ${result.profitFactor.toFixed(2)}`);
+        console.log(`   Expectancy: ${Helpers.formatCurrency(result.expectancy ?? 0)}`);
         console.log(`   Sharpe: ${result.sharpeRatio.toFixed(2)}\n`);
     }
 }
