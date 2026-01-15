@@ -17,8 +17,8 @@ import { db } from '../services/DatabaseManager';
 import { logger } from '../services/Logger';
 import { Helpers } from '../utils/Helpers';
 
-const MAX_TOTAL_MARGIN_COMMITMENT_RATIO = 0.8; // Максимум 50% от текущей эквити может быть задействовано под начальную маржу.
-const MAX_TOTAL_RISK_EXPOSURE_RATIO = 0.08;    // Максимум 6% от баланса может быть под риском одновременно (суммарный риск).
+const MAX_TOTAL_MARGIN_COMMITMENT_RATIO = 0.95; // Increased from 0.8 to allow more trades
+const MAX_TOTAL_RISK_EXPOSURE_RATIO = 0.30;    // Increased from 0.08 to allow up to 30% risk (Aggressive)
 // Если риск на сделку 1%, это позволит открыть макс 6 сделок.
 // Если риск на сделку 2%, это позволит открыть макс 3 сделки.
 
@@ -102,14 +102,45 @@ export class RiskManager {
     // Если confidence = 1.0 -> множитель 1.0
     const confidenceMultiplier = 0.8 + (signal.confidence * 0.2);
 
-    const adjustedSize = sizeUSD * confidenceMultiplier;
-    const adjustedQuantity = quantity * confidenceMultiplier;
+    let adjustedSize = sizeUSD * confidenceMultiplier;
+
+    // === NEW CLAMPING LOGIC ===
+    // 1. Get portfolio constraints
+    const openPositions = this.getActivePositions();
+    let totalMarginCurrentlyUsed = 0;
+    let totalRiskCurrentlyExposed = 0;
+
+    for (const openPos of openPositions) {
+      totalMarginCurrentlyUsed += openPos.size / openPos.leverage;
+      const posQuantity = openPos.size / openPos.entry;
+      totalRiskCurrentlyExposed += Math.abs(openPos.entry - openPos.stopLoss) * posQuantity;
+    }
+
+    // 2. Calculate remaining capacity
+    const maxTotalMarginAllowed = (this.currentBalance * MAX_TOTAL_MARGIN_COMMITMENT_RATIO) - 0.1; // Subtract 0.1 USD epsilon
+    const remainingMarginUSD = Math.max(0, maxTotalMarginAllowed - totalMarginCurrentlyUsed);
+    const maxSizeByMargin = remainingMarginUSD * riskParams.leverage;
+
+    const maxTotalRiskAllowed = (this.currentBalance * MAX_TOTAL_RISK_EXPOSURE_RATIO) - 0.1; // Subtract 0.1 USD epsilon
+    const remainingRiskUSD = Math.max(0, maxTotalRiskAllowed - totalRiskCurrentlyExposed);
+    const maxSizeByRiskExposure = remainingRiskUSD / (slPercent / 100);
+
+    // 3. Clamp the size
+    const initialAdjustedSize = adjustedSize;
+    // Floor to nearest cent for precision safety
+    adjustedSize = Math.floor(Math.min(adjustedSize, maxSizeByMargin, maxSizeByRiskExposure) * 100) / 100;
+
+    if (adjustedSize < initialAdjustedSize && adjustedSize > 0) {
+      logger.info('RiskManager', `Size clamped for ${signal.symbol}: ${initialAdjustedSize.toFixed(2)} -> ${adjustedSize.toFixed(2)} USD due to margin or exposure limits.`);
+    }
+
+    const adjustedQuantity = adjustedSize / signal.entry;
 
     return {
       size: adjustedSize, // Номинальный объем позиции в USD
       quantity: adjustedQuantity, // Количество базового актива
-      risk: riskAmount * confidenceMultiplier,
-      riskPercent: effectiveRiskPerTrade * 100 * confidenceMultiplier,
+      risk: (adjustedSize * (slPercent / 100)),
+      riskPercent: (adjustedSize * (slPercent / 100) / this.currentBalance) * 100,
       leverage: riskParams.leverage
     };
   }
@@ -345,7 +376,7 @@ export class RiskManager {
 
     // 5. Проверка общего лимита маржинальных обязательств
     const maxTotalMarginAllowed = currentEquity * MAX_TOTAL_MARGIN_COMMITMENT_RATIO;
-    if (totalMarginCurrentlyUsed + marginRequiredForNewTrade > maxTotalMarginAllowed) {
+    if (totalMarginCurrentlyUsed + marginRequiredForNewTrade > maxTotalMarginAllowed + 0.05) { // Add 0.05 USD epsilon
       return {
         valid: false,
         reason: `Margin commitment limit reached.`
@@ -360,7 +391,7 @@ export class RiskManager {
     const maxTotalRiskAllowed = currentEquity * MAX_TOTAL_RISK_EXPOSURE_RATIO;
     const projectedTotalRisk = totalRiskCurrentlyExposed + newTradeRiskDollar;
 
-    if (projectedTotalRisk > maxTotalRiskAllowed) {
+    if (projectedTotalRisk > maxTotalRiskAllowed + 0.05) { // Add 0.05 USD epsilon
       return {
         valid: false,
         reason: `Total risk exposure limit exceeded. Projected: ${Helpers.formatCurrency(projectedTotalRisk)} ` +
