@@ -28,7 +28,7 @@ import * as path from 'path';
 
 // --- CONSTANTS ---
 const SLIPPAGE_PERCENT = 0.0002;  // 0.02% base slippage
-const STRATEGY_LOOKBACK = 300;   // History window
+const STRATEGY_LOOKBACK = 1200;   // History window
 
 // Strategy regime filters (must match StrategyEngine RR-driven constraints)
 const ATR_PERIOD = 14;
