@@ -792,5 +792,62 @@ export class BacktestEngine {
         console.log(`   Profit Factor: ${result.profitFactor.toFixed(2)}`);
         console.log(`   Expectancy: ${Helpers.formatCurrency(result.expectancy ?? 0)}`);
         console.log(`   Sharpe: ${result.sharpeRatio.toFixed(2)}\n`);
+
+        // --- SUMMARY TABLE BY COIN ---
+        const statsBySymbol = new Map<string, { trades: number, wins: number, pnl: number, tpCount: number, slCount: number }>();
+
+        for (const trade of result.trades) {
+            const symbol = trade.position.symbol;
+            const stats = statsBySymbol.get(symbol) || { trades: 0, wins: 0, pnl: 0, tpCount: 0, slCount: 0 };
+            stats.trades++;
+            if (trade.won) stats.wins++;
+            stats.pnl += trade.position.pnl || 0;
+
+            if (trade.position.exitReason === TradeExitReason.TAKE_PROFIT) stats.tpCount++;
+            if (trade.position.exitReason === TradeExitReason.STOP_LOSS) stats.slCount++;
+
+            statsBySymbol.set(symbol, stats);
+        }
+
+        if (statsBySymbol.size > 0) {
+            console.log('📊 Summary by Coin:');
+            console.log('┌──────────────┬────────┬────────┬────────┬──────────┬─────────────┐');
+            console.log('│ Symbol       │ Trades │ TP     │ SL     │ Winrate  │ PnL         │');
+            console.log('├──────────────┼────────┼────────┼────────┼──────────┼─────────────┤');
+
+            const sortedSymbols = Array.from(statsBySymbol.keys()).sort();
+            for (const symbol of sortedSymbols) {
+                const stats = statsBySymbol.get(symbol)!;
+                const winRate = (stats.wins / stats.trades) * 100;
+                const pnlStr = Helpers.formatCurrency(stats.pnl);
+                console.log(`│ ${symbol.padEnd(12)} │ ${stats.trades.toString().padStart(6)} │ ${stats.tpCount.toString().padStart(6)} │ ${stats.slCount.toString().padStart(6)} │ ${winRate.toFixed(1).padStart(7)}% │ ${pnlStr.padStart(11)} │`);
+            }
+
+            console.log('└──────────────┴────────┴────────┴────────┴──────────┴─────────────┘\n');
+        }
+
+        // --- MONTHLY PERFORMANCE TABLE ---
+        const monthlyStats = new Map<string, number>();
+        for (const trade of result.trades) {
+            const date = new Date(trade.position.closeTime || trade.position.openTime);
+            const key = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}`;
+            monthlyStats.set(key, (monthlyStats.get(key) || 0) + (trade.position.pnl || 0));
+        }
+
+        if (monthlyStats.size > 0) {
+            console.log('📅 Monthly Performance:');
+            console.log('┌─────────────┬─────────────┐');
+            console.log('│ Month       │ PnL         │');
+            console.log('├─────────────┼─────────────┤');
+
+            const sortedMonths = Array.from(monthlyStats.keys()).sort();
+            for (const month of sortedMonths) {
+                const pnl = monthlyStats.get(month)!;
+                const pnlStr = Helpers.formatCurrency(pnl);
+                const color = pnl >= 0 ? '🟢' : '🔴';
+                console.log(`│ ${month.padEnd(11)} │ ${pnlStr.padStart(11)} ${color} │`);
+            }
+            console.log('└─────────────┴─────────────┘\n');
+        }
     }
 }
