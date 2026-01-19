@@ -320,3 +320,13 @@ export interface LogEntry {
   message: string;
   data?: any;
 }
+
+// ============================================
+// TELEGRAM TYPES
+// ============================================
+
+export interface TelegramConfig {
+  botToken: string;
+  chatId: string;
+  enabled: boolean;
+}

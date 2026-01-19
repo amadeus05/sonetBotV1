@@ -4,7 +4,7 @@
  */
 
 import * as dotenv from 'dotenv';
-import { BotConfig, StrategyConfig, RiskParameters, FeeConfig } from '../types';
+import { BotConfig, StrategyConfig, RiskParameters, FeeConfig, TelegramConfig } from '../types';
 
 dotenv.config();
 
@@ -34,6 +34,14 @@ export class ConfigManager {
 
   public getRiskConfig(): RiskParameters {
     return this.config.risk;
+  }
+
+  public getTelegramConfig(): TelegramConfig {
+    return {
+      botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+      chatId: process.env.TELEGRAM_CHAT_ID || '',
+      enabled: process.env.TELEGRAM_ENABLED !== 'false'
+    };
   }
 
   public updateConfig(updates: Partial<BotConfig>): void {

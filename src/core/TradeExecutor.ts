@@ -12,6 +12,7 @@ import {
   SignalType
 } from '../types';
 import { BinanceService } from '../services/BinanceService';
+import { TelegramService } from '../services/TelegramService';
 import { RiskManager } from './RiskManager';
 import { db } from '../services/DatabaseManager';
 import { logger } from '../services/Logger';
@@ -21,10 +22,12 @@ import { config } from '../config/ConfigManager';
 export class TradeExecutor {
   private binance: BinanceService;
   private riskManager: RiskManager;
+  private telegram: TelegramService;
 
   constructor(binance: BinanceService, riskManager: RiskManager) {
     this.binance = binance;
     this.riskManager = riskManager;
+    this.telegram = TelegramService.getInstance(config.getTelegramConfig());
   }
 
   /**
@@ -93,6 +96,17 @@ export class TradeExecutor {
         side: position.side,
         entry: position.entry,
         size: Helpers.formatCurrency(position.size)
+      });
+
+      // Send Telegram notification
+      this.telegram.notifyTradeEntry({
+        symbol: position.symbol,
+        type: position.side === PositionSide.LONG ? 'LONG' : 'SHORT',
+        size: position.size,
+        entryPrice: position.entry,
+        takeProfit: position.takeProfit,
+        stopLoss: position.stopLoss,
+        balance: this.riskManager.getBalance()
       });
 
       return position;
@@ -266,6 +280,20 @@ export class TradeExecutor {
     logger.trade(position.symbol, `Position finalized: ${reason}`, {
       pnl: Helpers.formatCurrency(pnlValue),
       pnlPercent: Helpers.formatPercent(pnlPercent)
+    });
+
+    // Send Telegram notification
+    const fees = config.getConfig().fees;
+    const estimatedFee = position.size * (fees?.taker ?? 0.0005) * 2; // entry + exit
+    this.telegram.notifyTradeExit({
+      symbol: position.symbol,
+      type: isLong ? 'LONG' : 'SHORT',
+      exitPrice: exitPrice,
+      pnl: pnlValue,
+      pnlPercent: pnlPercent,
+      commission: estimatedFee,
+      reason: reason,
+      balance: this.riskManager.getBalance()
     });
   }
 
