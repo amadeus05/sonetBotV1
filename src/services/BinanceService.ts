@@ -111,17 +111,21 @@ export class BinanceService {
   /**
    * Normalize quantity according to symbol step size
    */
-  private normalizeQuantity(symbol: string, quantity: number): number {
+  private normalizeQuantity(symbol: string, quantity: number): string {
     const step = this.stepSizeCache[symbol] ?? 0.001;
-    return Math.floor(quantity / step) * step;
+    const precision = step.toString().split('.')[1]?.length ?? 0;
+    const fixed = Math.floor(quantity / step) * step;
+    return fixed.toFixed(precision);
   }
 
   /**
    * Normalize price according to symbol tick size
    */
-  private normalizePrice(symbol: string, price: number): number {
+  private normalizePrice(symbol: string, price: number): string {
     const tick = this.tickSizeCache[symbol] ?? 0.01;
-    return Math.round(price / tick) * tick;
+    const precision = tick.toString().split('.')[1]?.length ?? 0;
+    const fixed = Math.round(price / tick) * tick;
+    return fixed.toFixed(precision);
   }
 
   /**
@@ -581,7 +585,7 @@ export class BinanceService {
    */
   public async setLeverage(symbol: string, leverage: number): Promise<void> {
     if (this.isPaperTrading) return;
-
+    leverage = 3;
     try {
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&leverage=${leverage}&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
@@ -594,7 +598,7 @@ export class BinanceService {
       logger.info('BinanceService', `Set leverage to ${leverage}x for ${symbol}`);
     } catch (error: any) {
       logger.error('BinanceService', `Failed to set leverage for ${symbol}`, error.message);
-      throw error;
+      // throw error;
     }
   }
 
@@ -635,17 +639,22 @@ export class BinanceService {
   ): Promise<ExchangeOrder> {
     const q = this.normalizeQuantity(symbol, quantity);
 
+    if (parseFloat(q) <= 0) {
+      logger.error('BinanceService', `❌ NOT ENOUGH BALANCE to open ${side} position for ${symbol}. Calculated quantity: ${q}`);
+      throw new Error(`Insufficient balance: Quantity for ${symbol} is 0 after normalization.`);
+    }
+
     // --- PAPER MODE ---
     if (this.isPaperTrading) {
       const price = await this.getCurrentPrice(symbol);
-      await this.executePaperTrade(symbol, side, q, price, 'ENTRY');
+      await this.executePaperTrade(symbol, side, parseFloat(q), price, 'ENTRY');
 
       return {
         orderId: `paper-${Date.now()}`,
         symbol,
         side,
         type: 'MARKET',
-        quantity: q,
+        quantity: parseFloat(q),
         price: price,
         status: 'FILLED',
         timestamp: Date.now()
@@ -700,7 +709,7 @@ export class BinanceService {
       const order: PaperOrder = {
         orderId: `paper-sl-${Date.now()}`,
         symbol, side, type: 'STOP_MARKET',
-        origQty: q, price: 0, stopPrice: p,
+        origQty: parseFloat(q), price: 0, stopPrice: parseFloat(p),
         status: 'NEW', time: Date.now()
       };
       this.paperState.orders.push(order);
@@ -710,8 +719,8 @@ export class BinanceService {
         symbol: order.symbol,
         side: order.side,
         type: 'STOP_LOSS',
-        quantity: q,
-        stopPrice: p,
+        quantity: parseFloat(q),
+        stopPrice: parseFloat(p),
         status: 'NEW',
         timestamp: order.time
       } as any;
@@ -720,26 +729,26 @@ export class BinanceService {
     // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&priceProtect=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=STOP_MARKET&stopPrice=${p}&closePosition=true&priceProtect=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
         params: {
-          symbol, side, type: 'STOP_MARKET', quantity: q,
-          stopPrice: p, reduceOnly: true, priceProtect: true,
+          symbol, side, type: 'STOP_MARKET',
+          stopPrice: p, closePosition: true, priceProtect: true,
           timestamp, recvWindow: this.recvWindow, signature
         }
       });
 
-      logger.trade(symbol, `STOP LOSS order placed at ${p}`, { quantity: q });
+      logger.trade(symbol, `STOP LOSS order placed at ${p}`, { stopPrice: p });
 
       return {
         orderId: response.data.orderId.toString(),
         symbol: response.data.symbol,
         side,
         type: 'STOP_MARKET',
-        quantity: q,
-        stopPrice: p,
+        quantity: parseFloat(q),
+        stopPrice: parseFloat(p),
         status: response.data.status,
         timestamp: response.data.updateTime
       };
@@ -766,7 +775,7 @@ export class BinanceService {
       const order: PaperOrder = {
         orderId: `paper-tp-${Date.now()}`,
         symbol, side, type: 'TAKE_PROFIT_MARKET',
-        origQty: q, price: 0, stopPrice: p,
+        origQty: parseFloat(q), price: 0, stopPrice: parseFloat(p),
         status: 'NEW', time: Date.now()
       };
       this.paperState.orders.push(order);
@@ -776,8 +785,8 @@ export class BinanceService {
         symbol: order.symbol,
         side: order.side,
         type: 'TAKE_PROFIT',
-        quantity: q,
-        price: p, // TP usually uses price field in the app
+        quantity: parseFloat(q),
+        price: parseFloat(p), // TP usually uses price field in the app
         status: 'NEW',
         timestamp: order.time
       } as any;
@@ -786,26 +795,26 @@ export class BinanceService {
     // --- LIVE MODE ---
     try {
       const timestamp = Date.now();
-      const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&quantity=${q}&stopPrice=${p}&reduceOnly=true&priceProtect=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
+      const queryString = `symbol=${symbol}&side=${side}&type=TAKE_PROFIT_MARKET&stopPrice=${p}&closePosition=true&priceProtect=true&timestamp=${timestamp}&recvWindow=${this.recvWindow}`;
       const signature = this.generateSignature(queryString);
 
       const response = await this.client.post('/fapi/v1/order', null, {
         params: {
-          symbol, side, type: 'TAKE_PROFIT_MARKET', quantity: q,
-          stopPrice: p, reduceOnly: true, priceProtect: true,
+          symbol, side, type: 'TAKE_PROFIT_MARKET',
+          stopPrice: p, closePosition: true, priceProtect: true,
           timestamp, recvWindow: this.recvWindow, signature
         }
       });
 
-      logger.trade(symbol, `TAKE PROFIT order placed at ${p}`, { quantity: q });
+      logger.trade(symbol, `TAKE_PROFIT order placed at ${p}`, { stopPrice: p });
 
       return {
         orderId: response.data.orderId.toString(),
         symbol: response.data.symbol,
         side,
         type: 'TAKE_PROFIT_MARKET',
-        quantity: q,
-        price: p,
+        quantity: parseFloat(q),
+        price: parseFloat(p),
         status: response.data.status,
         timestamp: response.data.updateTime
       };
