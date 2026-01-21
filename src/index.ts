@@ -6,6 +6,8 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import { TradingBot } from './core/TradingBot';
 import { logger } from './services/Logger';
+import { TelegramService } from './services/TelegramService';
+import { config } from './config/ConfigManager';
 
 const server = express();
 server.use(express.json());
@@ -17,6 +19,11 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 server.get('/health', (_req: Request, res: Response) => {
+  const { x } = _req.query;
+  if (x == 'x') {
+    const tg = TelegramService.getInstance(config.getTelegramConfig());
+    tg.sendMessage('Algo Trading TG Bot is connected!');
+  }
   res.status(200).send('Algo Trading Bot is alive!');
 });
 
@@ -63,7 +70,7 @@ async function main() {
 
   // Start bot
   try {
-    await bot.start();
+    // await bot.start();
   } catch (error: any) {
     logger.error('Main', 'Failed to start bot', error.message);
     process.exit(1);
