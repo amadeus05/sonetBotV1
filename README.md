@@ -312,3 +312,19 @@ For issues or questions:
 **Remember:** Start with testnet, run backtests, understand the strategy, and never risk more than you can afford to lose!
 
 Good luck! 🚀
+
+
+
+# 1) Простая проверка дефолтной БД
+npm run validate-db
+
+# 2) Проверка конкретной БД (важно: аргументы после --)
+npm run validate-db -- --db ./data15m360-200%/trading.db --timeframe 15m
+
+# 3) Ограничить монеты / скорость / лимит проблем
+npm run validate-db -- --db ./data/trading.db --max-symbols 5 --delay-ms 120 --max-issues 50
+
+# 4) Проверить только выбранные монеты
+npm run validate-db -- --db ./data/trading.db --symbols BTCUSDT,ETHUSDT
+
+npm run validate-db -- --include-live

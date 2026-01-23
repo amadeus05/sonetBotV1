@@ -368,13 +368,14 @@ export class DatabaseManager {
   // ============================================
 
   /**
-   * Save candles to local cache (INSERT OR IGNORE to avoid duplicates)
+   * Save candles to local cache
+   * Важно для перекачки: свеча с тем же (symbol,timeframe,timestamp) должна обновляться.
    */
   public saveCandles(symbol: string, timeframe: string, candles: Candle[]): void {
     if (candles.length === 0) return;
 
     const insert = this.db.prepare(`
-      INSERT OR IGNORE INTO historical_candles 
+      INSERT OR REPLACE INTO historical_candles 
       (symbol, timeframe, timestamp, open, high, low, close, volume, takerBuyBaseVolume, openInterest)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);

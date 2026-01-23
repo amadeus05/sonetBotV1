@@ -429,32 +429,25 @@ export class BacktestRunner {
         const startTime = startDate.getTime();
         const endTime = endDate.getTime();
 
-        // 1. ПРОСТОЙ ЗАПРОС В БАЗУ
-        // Пытаемся достать данные за указанный период (можно добавить запас tolerance, если хотите)
-        // Но даже строгий запрос подойдет, если данные там есть.
-        const cached = db.getCandles(symbol, timeframe, startTime, endTime);
+        const timeframeMs = this.timeframeToMs(timeframe);
 
-        // 2. ЖЕЛЕЗНАЯ ЛОГИКА: ЕСТЬ ДАННЫЕ -> БЕРЕМ
-        // Мы не проверяем, хватает ли их полностью, нет ли дырок.
-        // Если массив не пустой — отдаем его.
-        if (cached.length > 0) {
-            console.log(`✅ [DB] ${symbol}: Found ${cached.length} candles. Using DB.`);
+        // 1) Пытаемся взять из БД, но ТОЛЬКО если диапазон действительно покрыт и нет явных дыр.
+        const cached = db.getCandles(symbol, timeframe, startTime, endTime);
+        const cacheLooksComplete = cached.length > 0 && db.hasDataForRange(symbol, timeframe, startTime, endTime);
+        if (cacheLooksComplete && this.isCandleSeriesSane(cached, timeframeMs)) {
+            console.log(`✅ [DB] ${symbol}: Using cached candles (${cached.length}).`);
             return cached;
+        } else if (cached.length > 0) {
+            console.log(`⚠️ [DB] ${symbol}: Cache exists (${cached.length}) but выглядит неполным/битым. Перекачиваю диапазон...`);
         }
 
         // Если в базе пусто (length === 0) — тогда качаем
-        console.log(`ℹ️ [DB] ${symbol}: No data found. Downloading from API...`);
+        if (cached.length === 0) console.log(`ℹ️ [DB] ${symbol}: No data found. Downloading from API...`);
 
         // --- БЛОК СКАЧИВАНИЯ ---
         const allCandles: Candle[] = [];
         let currentTime = startTime;
         const klineLimit = 1000;
-
-        // Перевод таймфрейма в мс для итерации
-        let timeframeMs = 60000;
-        if (timeframe === '5m') timeframeMs = 300000;
-        if (timeframe === '15m') timeframeMs = 900000;
-        if (timeframe === '1h') timeframeMs = 3600000;
 
         while (currentTime < endTime) {
             await Helpers.sleep(50);
@@ -473,13 +466,61 @@ export class BacktestRunner {
         }
 
         const sorted = allCandles.sort((a, b) => a.timestamp - b.timestamp);
+        const deduped = this.dedupeCandlesByTimestamp(sorted)
+            .filter(c => c.timestamp >= startTime && c.timestamp <= endTime)
+            .sort((a, b) => a.timestamp - b.timestamp);
 
         // Сохраняем скачанное (ОБЯЗАТЕЛЬНО должен быть INSERT OR REPLACE в db)
-        if (sorted.length > 0) {
-            db.saveCandles(symbol, timeframe, sorted);
+        if (deduped.length > 0) {
+            db.saveCandles(symbol, timeframe, deduped);
         }
 
-        return sorted;
+        return deduped;
+    }
+
+    private timeframeToMs(timeframe: string): number {
+        const tf = (timeframe || '').trim();
+        const match = tf.match(/^(\d+)([mhdw])$/i);
+        if (!match) return 0;
+        const value = parseInt(match[1], 10);
+        const unit = match[2].toLowerCase();
+        if (!Number.isFinite(value) || value <= 0) return 0;
+        switch (unit) {
+            case 'm': return value * 60 * 1000;
+            case 'h': return value * 60 * 60 * 1000;
+            case 'd': return value * 24 * 60 * 60 * 1000;
+            case 'w': return value * 7 * 24 * 60 * 60 * 1000;
+            default: return 0;
+        }
+    }
+
+    private dedupeCandlesByTimestamp(candles: Candle[]): Candle[] {
+        if (candles.length <= 1) return candles;
+        const map = new Map<number, Candle>();
+        for (const c of candles) map.set(c.timestamp, c); // last wins
+        return Array.from(map.values());
+    }
+
+    private isCandleSeriesSane(candles: Candle[], timeframeMs: number): boolean {
+        if (candles.length < 2) return true;
+
+        // Must be strictly non-decreasing by timestamp.
+        for (let i = 1; i < candles.length; i++) {
+            if (candles[i].timestamp < candles[i - 1].timestamp) return false;
+        }
+
+        // If timeframe is known, detect obvious gaps/duplicates.
+        if (timeframeMs > 0) {
+            for (let i = 1; i < candles.length; i++) {
+                const dt = candles[i].timestamp - candles[i - 1].timestamp;
+                if (dt === 0) return false; // duplicate timestamp in series (should not happen after DB ORDER BY)
+                // allow multi-step gaps (weekends etc don't exist in crypto), but it's still a red flag:
+                if (dt % timeframeMs !== 0) return false;
+                // if there is a large gap, consider cache suspicious (missing candles)
+                if (dt > timeframeMs * 2) return false;
+            }
+        }
+        return true;
     }
 
     private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: MomentumStrategy): Promise<TradingSignal | null> {

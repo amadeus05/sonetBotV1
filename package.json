@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "backtest": "ts-node src/backtest.ts",
+    "validate-db": "ts-node src/scripts/validate-15m-db.ts",
     "clean": "rm -rf dist",
     "type-check": "tsc --noEmit"
   },
