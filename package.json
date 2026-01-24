@@ -28,6 +28,7 @@
     "better-sqlite3": "^9.2.2",
     "dotenv": "^16.3.1",
     "inversify": "^7.10.8",
+    "lightweight-charts": "^5.1.0",
     "lodash": "^4.17.21",
     "reflect-metadata": "^0.2.2",
     "ws": "^8.18.3",
