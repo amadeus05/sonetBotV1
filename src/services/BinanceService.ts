@@ -13,6 +13,7 @@ import {
   ExchangeOrder,
   ExchangeBalance
 } from '../types';
+import { CandleStreamMessage, ExchangeContract, PositionRisk, UserTrade } from './contracts/ExchangeContract';
 import { config } from '../config/ConfigManager';
 import { logger } from './Logger';
 
@@ -36,7 +37,7 @@ interface PaperOrder {
   time: number;
 }
 
-export class BinanceService {
+export class BinanceService implements ExchangeContract {
   private apiKey: string;
   private apiSecret: string;
   private baseURL: string;
@@ -235,7 +236,7 @@ export class BinanceService {
    * Get specific position risk (size, margin, etc.)
    * Used to verify if position is still open on exchange
    */
-  public async getPositionRisk(symbol: string): Promise<{ positionAmt: number; entryPrice: number; unrealizedProfit: number } | null> {
+  public async getPositionRisk(symbol: string): Promise<PositionRisk | null> {
     // --- PAPER MODE ---
     if (this.isPaperTrading) {
       const pos = this.paperState.positions.get(symbol);
@@ -364,7 +365,7 @@ export class BinanceService {
   /**
    * Get User Trades (needed for TradeExecutor)
    */
-  public async getUserTrades(symbol: string, limit: number = 50): Promise<any[]> {
+  public async getUserTrades(symbol: string, limit: number = 50): Promise<UserTrade[]> {
     // --- PAPER MODE ---
     if (this.isPaperTrading) {
       return this.paperState.trades
@@ -407,7 +408,7 @@ export class BinanceService {
   public subscribeToCandles(
     symbols: string[],
     interval: string,
-    callback: (data: any) => void
+    callback: (data: CandleStreamMessage) => void
   ): void {
     if (this.ws) {
       this.ws.terminate();

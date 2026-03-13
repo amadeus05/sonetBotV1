@@ -7,6 +7,7 @@ import { StrategyEngine } from './StrategyEngine';
 import { TradeExecutor } from './TradeExecutor';
 import { RiskManager } from './RiskManager';
 import { BinanceService } from '../services/BinanceService';
+import { ExchangeContract } from '../services/contracts/ExchangeContract';
 import { MarketDataManager } from '../services/MarketDataManager'; // Новый сервис
 import { config } from '../config/ConfigManager';
 import { logger } from '../services/Logger';
@@ -15,7 +16,7 @@ import { Helpers } from '../utils/Helpers';
 import { MarketData } from '../types';
 
 export class TradingBot {
-  private binance: BinanceService;
+  private exchange: ExchangeContract;
   private riskManager: RiskManager;
   private strategyEngine: StrategyEngine;
   private tradeExecutor: TradeExecutor;
@@ -24,16 +25,16 @@ export class TradingBot {
   private isRunning: boolean = false;
   private positionMonitorInterval?: NodeJS.Timeout;
 
-  constructor() {
+  constructor(exchange?: ExchangeContract) {
     const initialBalance = config.getRiskConfig().accountBalance;
     
-    this.binance = new BinanceService();
+    this.exchange = exchange ?? new BinanceService();
     this.riskManager = new RiskManager(initialBalance);
     this.strategyEngine = new StrategyEngine(this.riskManager);
-    this.tradeExecutor = new TradeExecutor(this.binance, this.riskManager);
+    this.tradeExecutor = new TradeExecutor(this.exchange, this.riskManager);
     
     // Инициализируем менеджер рыночных данных
-    this.marketDataManager = new MarketDataManager(this.binance);
+    this.marketDataManager = new MarketDataManager(this.exchange);
 
     logger.info('TradingBot', '🤖 Bot initialized successfully (Event-Driven Mode)');
   }
@@ -51,14 +52,14 @@ export class TradingBot {
 
     try {
       // 1. Test connection
-      const connected = await this.binance.testConnection();
+      const connected = await this.exchange.testConnection();
       if (!connected) {
         throw new Error('Failed to connect to Binance');
       }
 
       // 2. Load Exchange Info (CRITICAL: Load LOT_SIZE filters)
       logger.info('TradingBot', '📥 Loading exchange rules...');
-      await this.binance.loadExchangeInfo();
+      await this.exchange.loadExchangeInfo();
 
       // 3. Sync balance
       await this.syncBalance();
@@ -172,7 +173,7 @@ export class TradingBot {
    */
   private async syncBalance(): Promise<void> {
     try {
-      const balances = await this.binance.getBalance();
+      const balances = await this.exchange.getBalance();
       const usdtBalance = balances.find(b => b.asset === 'USDT');
 
       if (usdtBalance && usdtBalance.total > 0) {

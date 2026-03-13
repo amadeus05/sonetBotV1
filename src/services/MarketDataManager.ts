@@ -1,5 +1,5 @@
 import { Candle } from '../types';
-import { BinanceService } from './BinanceService';
+import { ExchangeContract } from './contracts/ExchangeContract';
 import { logger } from './Logger';
 import { Helpers } from '../utils/Helpers';
 
@@ -9,7 +9,7 @@ interface TickerCache {
 }
 
 export class MarketDataManager {
-  private binance: BinanceService;
+  private exchange: ExchangeContract;
   
   // Cache storage
   private candlesCache: Map<string, Candle[]> = new Map();
@@ -25,8 +25,8 @@ export class MarketDataManager {
   private maxCandles = 1000;
   private tickerTtl = 60 * 60 * 1000; // 1 hour TTL
 
-  constructor(binance: BinanceService) {
-    this.binance = binance;
+  constructor(exchange: ExchangeContract) {
+    this.exchange = exchange;
   }
 
   /**
@@ -43,7 +43,7 @@ export class MarketDataManager {
     symbols.forEach(s => this.initializationBuffer.set(s, []));
 
     // 1. Subscribe First (Start Buffering)
-    this.binance.subscribeToCandles(symbols, timeframe, (streamData) => {
+    this.exchange.subscribeToCandles(symbols, timeframe, (streamData) => {
         const symbol = streamData.s;
         
         if (this.isInitializing) {
@@ -64,7 +64,7 @@ export class MarketDataManager {
     
     for (const symbol of symbols) {
       try {
-        const history = await this.binance.getCandles(symbol, timeframe, this.maxCandles);
+        const history = await this.exchange.getCandles(symbol, timeframe, this.maxCandles);
         
         // 3. Merge Buffer into History
         this.mergeHistoryWithBuffer(symbol, history);
@@ -139,7 +139,7 @@ export class MarketDataManager {
   }
 
   public close(): void {
-    this.binance.closeConnection();
+    this.exchange.closeConnection();
     this.candlesCache.clear();
     this.initializationBuffer.clear();
   }
@@ -194,7 +194,7 @@ export class MarketDataManager {
              // Refetch history to fix the gap
              try {
                 // Use the timeframe passed to initialize to stay consistent
-                const fixedHistory = await this.binance.getCandles(symbol, timeframe, this.maxCandles);
+                const fixedHistory = await this.exchange.getCandles(symbol, timeframe, this.maxCandles);
                 this.candlesCache.set(symbol, fixedHistory);
                 
                 // If the new candle is closed, trigger the callback now with fixed data
@@ -237,7 +237,7 @@ export class MarketDataManager {
     }
 
     try {
-      const data = await Helpers.retry(() => this.binance.get24hTicker(symbol), 3, 1000);
+      const data = await Helpers.retry(() => this.exchange.get24hTicker(symbol), 3, 1000);
       this.tickerCache.set(symbol, {
         data: data,
         timestamp: now

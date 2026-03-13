@@ -14,7 +14,7 @@
  */
 
 import { Candle, TradingSignal, TrendDirection } from '../types';
-import { BinanceService } from '../services/BinanceService';
+import { ExchangeContract } from '../services/contracts/ExchangeContract';
 
 export interface TimeframeAnalysis {
     timeframe: string;
@@ -71,12 +71,12 @@ export class MultiTimeframeFilter {
         symbol: string,
         signal: TradingSignal,
         currentTimeframe: string,
-        binanceService: BinanceService
+        exchange: ExchangeContract
     ): Promise<MTFConfirmation> {
         const analyses: TimeframeAnalysis[] = [];
         for (const tf of this.getTimeframesToCheck(currentTimeframe)) {
             try {
-                const candles = await binanceService.getCandles(symbol, tf, 200);
+                const candles = await exchange.getCandles(symbol, tf, 200);
                 analyses.push(this.analyzeTimeframe(candles, tf));
             } catch {
                 continue;

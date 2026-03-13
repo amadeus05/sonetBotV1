@@ -18,6 +18,7 @@ import {
 import { StrategyEngine } from './StrategyEngine';
 import { RiskManager } from './RiskManager';
 import { BinanceService } from '../services/BinanceService';
+import { ExchangeContract } from '../services/contracts/ExchangeContract';
 import { db } from '../services/DatabaseManager';
 import { logger } from '../services/Logger';
 import { Helpers } from '../utils/Helpers';
@@ -44,7 +45,7 @@ const VOLUME_FILTER_MULT = 1.1;
 const FIXED_POSITION_SIZE_MODE = true;
 
 export class BacktestEngine {
-    private binance: BinanceService;
+    private exchange: ExchangeContract;
     private walletBalance: number = 0;
     private freeBalance: number = 0;
     private lockedMargin: number = 0;
@@ -55,8 +56,8 @@ export class BacktestEngine {
     private maxRiskExposureRatio = 0.08; // Increased slightly for flex
     private initialBalance: number = 0;
 
-    constructor() {
-        this.binance = new BinanceService();
+    constructor(exchange?: ExchangeContract) {
+        this.exchange = exchange ?? new BinanceService();
     }
 
     private takerFee(): number {
@@ -866,7 +867,7 @@ export class BacktestEngine {
 
         while (currentTime < endTime) {
             await Helpers.sleep(50);
-            const candles = await this.binance.getCandles(symbol, timeframe, klineLimit, currentTime, endTime);
+            const candles = await this.exchange.getCandles(symbol, timeframe, klineLimit, currentTime, endTime);
             if (candles.length === 0) break;
 
             const mergedCandles = candles

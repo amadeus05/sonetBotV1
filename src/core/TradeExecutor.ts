@@ -11,7 +11,7 @@ import {
   TradeExitReason,
   SignalType
 } from '../types';
-import { BinanceService } from '../services/BinanceService';
+import { ExchangeContract } from '../services/contracts/ExchangeContract';
 import { TelegramService } from '../services/TelegramService';
 import { RiskManager } from './RiskManager';
 import { db } from '../services/DatabaseManager';
@@ -20,12 +20,12 @@ import { Helpers } from '../utils/Helpers';
 import { config } from '../config/ConfigManager';
 
 export class TradeExecutor {
-  private binance: BinanceService;
+  private exchange: ExchangeContract;
   private riskManager: RiskManager;
   private telegram: TelegramService;
 
-  constructor(binance: BinanceService, riskManager: RiskManager) {
-    this.binance = binance;
+  constructor(exchange: ExchangeContract, riskManager: RiskManager) {
+    this.exchange = exchange;
     this.riskManager = riskManager;
     this.telegram = TelegramService.getInstance(config.getTelegramConfig());
   }
@@ -56,13 +56,13 @@ export class TradeExecutor {
       });
 
       // Set margin type to ISOLATED (Binance requirement)
-      await this.binance.setMarginType(symbol, 'ISOLATED');
+      await this.exchange.setMarginType(symbol, 'ISOLATED');
 
       // Set leverage AFTER margin type
-      await this.binance.setLeverage(symbol, config.getRiskConfig().leverage);
+      await this.exchange.setLeverage(symbol, config.getRiskConfig().leverage);
 
       // Place market order
-      const order = await this.binance.placeMarketOrder(symbol, side, quantity);
+      const order = await this.exchange.placeMarketOrder(symbol, side, quantity);
 
       if (order.status !== 'FILLED') {
         logger.error('TradeExecutor', 'Order not filled', { order });
@@ -124,7 +124,7 @@ export class TradeExecutor {
     const isLong = position.side === PositionSide.LONG;
     try {
       // 1. Fetch real position from exchange (TRUTH)
-      const posRisk = await this.binance.getPositionRisk(position.symbol);
+      const posRisk = await this.exchange.getPositionRisk(position.symbol);
       if (!posRisk || Math.abs(posRisk.positionAmt) === 0) {
         logger.error('TradeExecutor', `Cannot place SL/TP: No open position found on exchange for ${position.symbol}`);
         return;
@@ -135,7 +135,7 @@ export class TradeExecutor {
 
       // 2. Place Stop Loss (opposite side)
       const slSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
-      await this.binance.placeStopLoss(
+      await this.exchange.placeStopLoss(
         position.symbol,
         slSide,
         quantity,
@@ -144,7 +144,7 @@ export class TradeExecutor {
 
       // 3. Place Take Profit (opposite side)
       const tpSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
-      await this.binance.placeTakeProfit(
+      await this.exchange.placeTakeProfit(
         position.symbol,
         tpSide,
         quantity,
@@ -153,7 +153,7 @@ export class TradeExecutor {
 
       // 4. VALIDATE PLACEMENT
       await Helpers.sleep(500); // Wait for Binance to process
-      const openOrders = await this.binance.getOpenOrders(position.symbol);
+      const openOrders = await this.exchange.getOpenOrders(position.symbol);
       const hasSL = openOrders.some(o => o.type === 'STOP_MARKET' || (o.type as string) === 'STOP_LOSS' || (o.type as string) === 'STOP');
       const hasTP = openOrders.some(o => o.type === 'TAKE_PROFIT_MARKET' || (o.type as string) === 'TAKE_PROFIT');
 
@@ -188,7 +188,7 @@ export class TradeExecutor {
       const side: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
 
       // 1. FIRST Check for existing SL/TP to determine if we should cancel first
-      const openOrders = await this.binance.getOpenOrders(position.symbol);
+      const openOrders = await this.exchange.getOpenOrders(position.symbol);
 
       // Правка: Приводим тип к string, чтобы избежать ошибки TypeScript о непересекающихся типах
       const hasSLTP = openOrders.some(o => {
@@ -202,16 +202,16 @@ export class TradeExecutor {
       }
 
       // 2. Check quantity via position risk (avoid LOT_SIZE errors on closing remnants)
-      const posRisk = await this.binance.getPositionRisk(position.symbol);
+      const posRisk = await this.exchange.getPositionRisk(position.symbol);
 
       // If position amt is 0, it was already closed (likely by SL/TP or liquidation)
       if (!posRisk || Math.abs(posRisk.positionAmt) === 0) {
         logger.warn('TradeExecutor', `Position ${position.symbol} already closed on exchange`);
 
         // Get accurate exit price from history
-        const trades = await this.binance.getUserTrades(position.symbol, 3);
+        const trades = await this.exchange.getUserTrades(position.symbol, 3);
         const lastTrade = trades.sort((a, b) => b.time - a.time)[0];
-        const exitPrice = lastTrade ? lastTrade.price : await this.binance.getCurrentPrice(position.symbol);
+        const exitPrice = lastTrade ? lastTrade.price : await this.exchange.getCurrentPrice(position.symbol);
         const pnl = lastTrade ? lastTrade.realizedPnl : 0;
 
         // Just update DB state without sending a new order
@@ -223,7 +223,7 @@ export class TradeExecutor {
       const quantity = Math.abs(posRisk.positionAmt);
 
       // 3. Place market order to close
-      const order = await this.binance.placeMarketOrder(position.symbol, side, quantity);
+      const order = await this.exchange.placeMarketOrder(position.symbol, side, quantity);
       const exitPrice = order.price || posRisk.entryPrice; // Fallback to entry if price unavailable
 
       // 4. Update DB and Stats
@@ -308,7 +308,7 @@ export class TradeExecutor {
     for (const position of openPositions) {
       try {
         // 1. Get real status from Binance
-        const posRisk = await this.binance.getPositionRisk(position.symbol);
+        const posRisk = await this.exchange.getPositionRisk(position.symbol);
 
         if (!posRisk) continue;
 
@@ -317,7 +317,7 @@ export class TradeExecutor {
           logger.info('TradeExecutor', `Position ${position.symbol} closed on Exchange (detected via reconciliation)`);
 
           // Determine if it was SL or TP based on trade history
-          const trades = await this.binance.getUserTrades(position.symbol, 10);
+          const trades = await this.exchange.getUserTrades(position.symbol, 10);
           const tradesDuringPosition = trades.filter(t => t.time >= position.openTime);
           const lastTrade = tradesDuringPosition.sort((a, b) => b.time - a.time)[0];
 
@@ -329,7 +329,7 @@ export class TradeExecutor {
             realizedPnl = lastTrade.realizedPnl;
             logger.info('TradeExecutor', `Matched exchange trade for ${position.symbol}: ${lastTrade.side} @ ${lastTrade.price}, PnL: ${lastTrade.realizedPnl}`);
           } else {
-            exitPrice = await this.binance.getCurrentPrice(position.symbol);
+            exitPrice = await this.exchange.getCurrentPrice(position.symbol);
             logger.warn('TradeExecutor', `No trade found in history for ${position.symbol} closure, using current price`);
           }
 
@@ -365,10 +365,10 @@ export class TradeExecutor {
    */
   private async cancelAllOrders(symbol: string): Promise<void> {
     try {
-      const openOrders = await this.binance.getOpenOrders(symbol);
+      const openOrders = await this.exchange.getOpenOrders(symbol);
 
       for (const order of openOrders) {
-        await this.binance.cancelOrder(symbol, order.orderId);
+        await this.exchange.cancelOrder(symbol, order.orderId);
       }
     } catch (error: any) {
       logger.warn('TradeExecutor', `Failed to cancel orders for ${symbol}`, error.message);
@@ -379,7 +379,7 @@ export class TradeExecutor {
    * Round quantity to symbol's precision
    */
   private roundQuantity(quantity: number, symbol: string): number {
-    const stepSize = this.binance.getStepSize(symbol);
+    const stepSize = this.exchange.getStepSize(symbol);
     return Helpers.floorToStep(quantity, stepSize);
   }
 
