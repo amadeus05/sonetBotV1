@@ -19,11 +19,12 @@ async function runBacktest() {
 ╚═══════════════════════════════════════════════════════════╝
   `);
 
+  const { startDate, endDate } = config.getBacktestDateRange();
+
   // Configure backtest
   const backtestConfig: BacktestConfig = {
-    // Test last 30 days
-    startDate: new Date(Date.now() - 180 * 24 * 60 * 60 * 1000),
-    endDate: new Date(),
+    startDate,
+    endDate,
 
     // Symbols to test
     symbols: config.getConfig().symbols,
@@ -39,7 +40,7 @@ async function runBacktest() {
   };
 
   console.log('\n📋 Backtest Configuration:');
-  console.log(`   Period: ${backtestConfig.startDate.toISOString().split('T')[0]} to ${backtestConfig.endDate.toISOString().split('T')[0]}`);
+  console.log(`   Period: ${backtestConfig.startDate.toISOString()} to ${backtestConfig.endDate.toISOString()}`);
   console.log(`   Symbols: ${backtestConfig.symbols.join(', ')}`);
   console.log(`   Initial Balance: $${backtestConfig.initialBalance}`);
   console.log(`   Risk per Trade: ${backtestConfig.risk.riskPerTrade * 100}%`);

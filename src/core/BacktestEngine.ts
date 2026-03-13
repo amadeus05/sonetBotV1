@@ -769,8 +769,17 @@ export class BacktestEngine {
         missingCount: number;
         cleaned: Candle[];
     } {
-        const cleaned = this.sanitizeCandles(candles);
+        const sanitized = this.sanitizeCandles(candles);
         const timeframeMs = this.getTimeframeMs(timeframe);
+        const expectedFirst = Math.ceil(startTime / timeframeMs) * timeframeMs;
+        const expectedLast = endTime >= timeframeMs
+            ? Math.floor((endTime - timeframeMs) / timeframeMs) * timeframeMs
+            : -1;
+
+        const cleaned = sanitized.filter(candle =>
+            candle.timestamp >= expectedFirst
+            && (expectedLast < expectedFirst || candle.timestamp <= expectedLast)
+        );
 
         if (cleaned.length === 0) {
             return { valid: false, reason: 'empty dataset', missingCount: 0, cleaned };
@@ -799,20 +808,6 @@ export class BacktestEngine {
             return {
                 valid: false,
                 reason: `detected ${missingCount} missing candles`,
-                missingCount,
-                cleaned
-            };
-        }
-
-        const expectedFirst = Math.ceil(startTime / timeframeMs) * timeframeMs;
-        const expectedLast = endTime >= timeframeMs
-            ? Math.floor((endTime - timeframeMs) / timeframeMs) * timeframeMs
-            : -1;
-        const hasOutOfRange = cleaned[0].timestamp < expectedFirst || cleaned[cleaned.length - 1].timestamp > expectedLast;
-        if (hasOutOfRange) {
-            return {
-                valid: false,
-                reason: 'dataset contains candles outside requested range',
                 missingCount,
                 cleaned
             };
