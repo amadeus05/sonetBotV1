@@ -849,5 +849,62 @@ export class BacktestEngine {
             }
             console.log('└─────────────┴─────────────┘\n');
         }
+
+        const monthlyTradeStats = new Map<string, { pnl: number, trades: number, wins: number, losses: number }>();
+        const sideStats = new Map<PositionSide, { trades: number, wins: number, losses: number, pnl: number }>();
+
+        for (const trade of result.trades) {
+            const date = new Date(trade.position.closeTime || trade.position.openTime);
+            const monthKey = `${date.getFullYear()}-${(date.getMonth() + 1).toString().padStart(2, '0')}`;
+
+            const monthStats = monthlyTradeStats.get(monthKey) || { pnl: 0, trades: 0, wins: 0, losses: 0 };
+            monthStats.pnl += trade.position.pnl || 0;
+            monthStats.trades++;
+            if (trade.won) monthStats.wins++;
+            else monthStats.losses++;
+            monthlyTradeStats.set(monthKey, monthStats);
+
+            const side = trade.position.side;
+            const directionStats = sideStats.get(side) || { trades: 0, wins: 0, losses: 0, pnl: 0 };
+            directionStats.trades++;
+            directionStats.pnl += trade.position.pnl || 0;
+            if (trade.won) directionStats.wins++;
+            else directionStats.losses++;
+            sideStats.set(side, directionStats);
+        }
+
+        if (monthlyTradeStats.size > 0) {
+            console.log('📅 Monthly Performance Extended:');
+            console.log('┌─────────────┬─────────────┬────────┬────────┬────────┐');
+            console.log('│ Month       │ PnL         │ Total  │ Wins   │ Losses │');
+            console.log('├─────────────┼─────────────┼────────┼────────┼────────┤');
+
+            const sortedMonths = Array.from(monthlyTradeStats.keys()).sort();
+            for (const month of sortedMonths) {
+                const stats = monthlyTradeStats.get(month)!;
+                const pnlStr = Helpers.formatCurrency(stats.pnl);
+                console.log(`│ ${month.padEnd(11)} │ ${pnlStr.padStart(11)} │ ${stats.trades.toString().padStart(6)} │ ${stats.wins.toString().padStart(6)} │ ${stats.losses.toString().padStart(6)} │`);
+            }
+
+            console.log('└─────────────┴─────────────┴────────┴────────┴────────┘\n');
+        }
+
+        if (sideStats.size > 0) {
+            console.log('📈 Long / Short Summary:');
+            console.log('┌─────────────┬────────┬────────┬────────┬─────────────┐');
+            console.log('│ Direction   │ Total  │ Wins   │ Losses │ PnL         │');
+            console.log('├─────────────┼────────┼────────┼────────┼─────────────┤');
+
+            for (const side of [PositionSide.LONG, PositionSide.SHORT]) {
+                const stats = sideStats.get(side);
+                if (!stats) continue;
+
+                const label = side === PositionSide.LONG ? 'LONG' : 'SHORT';
+                const pnlStr = Helpers.formatCurrency(stats.pnl);
+                console.log(`│ ${label.padEnd(11)} │ ${stats.trades.toString().padStart(6)} │ ${stats.wins.toString().padStart(6)} │ ${stats.losses.toString().padStart(6)} │ ${pnlStr.padStart(11)} │`);
+            }
+
+            console.log('└─────────────┴────────┴────────┴────────┴─────────────┘\n');
+        }
     }
 }
