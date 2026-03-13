@@ -44,9 +44,42 @@ export class ConfigManager {
     };
   }
 
+  public getBacktestDateRange(): { startDate: Date; endDate: Date } {
+    const now = new Date();
+    const startDate = this.parseDateEnv(
+      process.env.BACKTEST_START_DATE,
+      'BACKTEST_START_DATE',
+      new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000)
+    );
+    const endDate = this.parseDateEnv(
+      process.env.BACKTEST_END_DATE,
+      'BACKTEST_END_DATE',
+      now
+    );
+
+    if (startDate.getTime() >= endDate.getTime()) {
+      throw new Error('BACKTEST_START_DATE must be earlier than BACKTEST_END_DATE');
+    }
+
+    return { startDate, endDate };
+  }
+
   public updateConfig(updates: Partial<BotConfig>): void {
     this.config = { ...this.config, ...updates };
     this.validateConfig();
+  }
+
+  private parseDateEnv(value: string | undefined, envName: string, fallback: Date): Date {
+    if (!value || value.trim() === '') {
+      return fallback;
+    }
+
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new Error(`${envName} must be a valid date string`);
+    }
+
+    return parsed;
   }
 
   private loadConfig(): BotConfig {
@@ -101,6 +134,9 @@ export class ConfigManager {
         'ZECUSDT',
         'TAOUSDT',
         'SUIUSDT',
+        'ATOMUSDT',
+        'ADAUSDT',
+        'SOLUSDT',
         // 'LINKUSDT',
         // 'RENDERUSDT',
         // 'XRPUSDT',
