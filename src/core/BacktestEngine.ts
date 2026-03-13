@@ -700,47 +700,180 @@ export class BacktestEngine {
         return data;
     }
 
+    private getTimeframeMs(timeframe: string): number {
+        const map: Record<string, number> = {
+            '1m': 60_000,
+            '3m': 180_000,
+            '5m': 300_000,
+            '15m': 900_000,
+            '30m': 1_800_000,
+            '1h': 3_600_000,
+            '4h': 14_400_000,
+            '1d': 86_400_000,
+        };
+
+        return map[timeframe] || 300_000;
+    }
+
+    private sanitizeCandles(candles: Candle[]): Candle[] {
+        if (candles.length === 0) return [];
+
+        const byTimestamp = new Map<number, Candle>();
+
+        for (const candle of candles) {
+            const values = [
+                candle.timestamp,
+                candle.open,
+                candle.high,
+                candle.low,
+                candle.close,
+                candle.volume,
+                candle.takerBuyBaseVolume ?? 0,
+                candle.openInterest ?? 0,
+            ];
+
+            const hasBadValue = values.some(v => !Number.isFinite(v));
+            const hasBadRange = candle.timestamp <= 0 ||
+                candle.open <= 0 ||
+                candle.high <= 0 ||
+                candle.low <= 0 ||
+                candle.close <= 0 ||
+                candle.volume < 0 ||
+                candle.low > candle.high ||
+                candle.open < candle.low ||
+                candle.open > candle.high ||
+                candle.close < candle.low ||
+                candle.close > candle.high;
+
+            if (hasBadValue || hasBadRange) continue;
+
+            byTimestamp.set(candle.timestamp, {
+                timestamp: candle.timestamp,
+                open: candle.open,
+                high: candle.high,
+                low: candle.low,
+                close: candle.close,
+                volume: candle.volume,
+                takerBuyBaseVolume: candle.takerBuyBaseVolume || 0,
+                openInterest: candle.openInterest || 0,
+            });
+        }
+
+        return Array.from(byTimestamp.values()).sort((a, b) => a.timestamp - b.timestamp);
+    }
+
+    private analyzeCandleIntegrity(candles: Candle[], timeframe: string, startTime: number, endTime: number): {
+        valid: boolean;
+        reason?: string;
+        missingCount: number;
+        cleaned: Candle[];
+    } {
+        const cleaned = this.sanitizeCandles(candles);
+        const timeframeMs = this.getTimeframeMs(timeframe);
+
+        if (cleaned.length === 0) {
+            return { valid: false, reason: 'empty dataset', missingCount: 0, cleaned };
+        }
+
+        for (let i = 1; i < cleaned.length; i++) {
+            if (cleaned[i].timestamp <= cleaned[i - 1].timestamp) {
+                return {
+                    valid: false,
+                    reason: `non-chronological candles around ${cleaned[i - 1].timestamp} -> ${cleaned[i].timestamp}`,
+                    missingCount: 0,
+                    cleaned
+                };
+            }
+        }
+
+        let missingCount = 0;
+        for (let i = 1; i < cleaned.length; i++) {
+            const diff = cleaned[i].timestamp - cleaned[i - 1].timestamp;
+            if (diff > timeframeMs) {
+                missingCount += Math.floor(diff / timeframeMs) - 1;
+            }
+        }
+
+        if (missingCount > 0) {
+            return {
+                valid: false,
+                reason: `detected ${missingCount} missing candles`,
+                missingCount,
+                cleaned
+            };
+        }
+
+        const expectedFirst = Math.ceil(startTime / timeframeMs) * timeframeMs;
+        const expectedLast = endTime >= timeframeMs
+            ? Math.floor((endTime - timeframeMs) / timeframeMs) * timeframeMs
+            : -1;
+        const hasOutOfRange = cleaned[0].timestamp < expectedFirst || cleaned[cleaned.length - 1].timestamp > expectedLast;
+        if (hasOutOfRange) {
+            return {
+                valid: false,
+                reason: 'dataset contains candles outside requested range',
+                missingCount,
+                cleaned
+            };
+        }
+
+        if (expectedLast >= expectedFirst) {
+            if (cleaned[0].timestamp !== expectedFirst) {
+                return {
+                    valid: false,
+                    reason: `missing leading candles (expected first ${expectedFirst}, got ${cleaned[0].timestamp})`,
+                    missingCount,
+                    cleaned
+                };
+            }
+
+            if (cleaned[cleaned.length - 1].timestamp !== expectedLast) {
+                return {
+                    valid: false,
+                    reason: `missing trailing candles (expected last ${expectedLast}, got ${cleaned[cleaned.length - 1].timestamp})`,
+                    missingCount,
+                    cleaned
+                };
+            }
+        }
+
+        return { valid: true, missingCount, cleaned };
+    }
+
     private async fetchHistoricalData(symbol: string, startDate: Date, endDate: Date): Promise<Candle[]> {
         const timeframe = config.getConfig().timeframe;
         const startTime = startDate.getTime();
         const endTime = endDate.getTime();
+        const timeframeMs = this.getTimeframeMs(timeframe);
 
-        // 1. ПРОСТОЙ ЗАПРОС В БАЗУ
-        // Пытаемся достать данные за указанный период (можно добавить запас tolerance, если хотите)
-        // Но даже строгий запрос подойдет, если данные там есть.
         const cached = db.getCandles(symbol, timeframe, startTime, endTime);
+        const cachedAudit = this.analyzeCandleIntegrity(cached, timeframe, startTime, endTime);
 
-        // 2. ЖЕЛЕЗНАЯ ЛОГИКА: ЕСТЬ ДАННЫЕ -> БЕРЕМ
-        // Мы не проверяем, хватает ли их полностью, нет ли дырок.
-        // Если массив не пустой — отдаем его.
-        if (cached.length > 0) {
-            console.log(`✅ [DB] ${symbol}: Found ${cached.length} candles. Using DB.`);
-            return cached;
+        if (cachedAudit.valid) {
+            console.log(`✅ [DB] ${symbol}: Found ${cachedAudit.cleaned.length} candles. Integrity OK.`);
+            return cachedAudit.cleaned;
+        } else if (cached.length > 0) {
+            console.log(`⚠️ [DB] ${symbol}: Cache rejected (${cachedAudit.reason}). Re-downloading range...`);
         }
 
-        // Если в базе пусто (length === 0) — тогда качаем
-        console.log(`ℹ️ [DB] ${symbol}: No data found. Downloading from API...`);
+        if (cached.length === 0) {
+            console.log(`ℹ️ [DB] ${symbol}: No data found. Downloading from API...`);
+        }
 
-        // --- БЛОК СКАЧИВАНИЯ ---
         const allCandles: Candle[] = [];
         let currentTime = startTime;
         const klineLimit = 1000;
 
-        // Перевод таймфрейма в мс для итерации
-        let timeframeMs = 60000;
-        if (timeframe === '5m') timeframeMs = 300000;
-        if (timeframe === '15m') timeframeMs = 900000;
-        if (timeframe === '1h') timeframeMs = 3600000;
-
         while (currentTime < endTime) {
             await Helpers.sleep(50);
-            const candles = await this.binance.getCandles(symbol, timeframe, klineLimit, currentTime);
+            const candles = await this.binance.getCandles(symbol, timeframe, klineLimit, currentTime, endTime);
             if (candles.length === 0) break;
 
-            const mergedCandles = candles.map(c => ({ ...c }));
+            const mergedCandles = candles
+                .map(c => ({ ...c }))
+                .filter(c => c.timestamp >= startTime && (c.timestamp + timeframeMs) <= endTime);
 
-            const filtered = mergedCandles.filter(c => c.timestamp >= startTime && c.timestamp <= endTime);
-            allCandles.push(...filtered);
+            allCandles.push(...mergedCandles);
 
             if (candles.length < klineLimit) break;
             const lastCandleTime = candles[candles.length - 1].timestamp;
@@ -748,14 +881,18 @@ export class BacktestEngine {
             currentTime = lastCandleTime + timeframeMs;
         }
 
-        const sorted = allCandles.sort((a, b) => a.timestamp - b.timestamp);
+        const sorted = this.sanitizeCandles(allCandles);
+        const downloadedAudit = this.analyzeCandleIntegrity(sorted, timeframe, startTime, endTime);
 
-        // Сохраняем скачанное (ОБЯЗАТЕЛЬНО должен быть INSERT OR REPLACE в db)
-        if (sorted.length > 0) {
-            db.saveCandles(symbol, timeframe, sorted);
+        if (!downloadedAudit.valid) {
+            throw new Error(`Historical data integrity failed for ${symbol}: ${downloadedAudit.reason}`);
         }
 
-        return sorted;
+        if (downloadedAudit.cleaned.length > 0) {
+            db.saveCandles(symbol, timeframe, downloadedAudit.cleaned);
+        }
+
+        return downloadedAudit.cleaned;
     }
 
     private async simulateStrategyAnalysis(symbol: string, candles: Candle[], strategy: StrategyEngine): Promise<TradingSignal | null> {

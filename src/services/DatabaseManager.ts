@@ -165,7 +165,10 @@ export class DatabaseManager {
       CREATE INDEX IF NOT EXISTS idx_trades_openTime ON trades(openTime);
       CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp);
       CREATE INDEX IF NOT EXISTS idx_candles_lookup ON historical_candles(symbol, timeframe, timestamp);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_candles_unique_key ON historical_candles(symbol, timeframe, timestamp);
     `);
+
+    this.deduplicateHistoricalCandles();
 
     // Migration: Add quantity column if it doesn't exist (better-sqlite3)
     const tableInfo = this.db.pragma("table_info(positions)") as any[];
@@ -174,6 +177,94 @@ export class DatabaseManager {
       logger.info('Database', 'Migrating database: adding quantity column to positions table');
       this.db.exec('ALTER TABLE positions ADD COLUMN quantity REAL NOT NULL DEFAULT 0');
     }
+  }
+
+  private deduplicateHistoricalCandles(): void {
+    const duplicatesStmt = this.db.prepare(`
+      SELECT COALESCE(SUM(extraCount), 0) as duplicateRows
+      FROM (
+        SELECT COUNT(*) - 1 as extraCount
+        FROM historical_candles
+        GROUP BY symbol, timeframe, timestamp
+        HAVING COUNT(*) > 1
+      )
+    `);
+    const before = (duplicatesStmt.get() as { duplicateRows: number }).duplicateRows || 0;
+
+    if (before <= 0) return;
+
+    this.db.exec(`
+      DELETE FROM historical_candles
+      WHERE rowid NOT IN (
+        SELECT MIN(rowid)
+        FROM historical_candles
+        GROUP BY symbol, timeframe, timestamp
+      )
+    `);
+
+    logger.warn('Database', `Removed ${before} duplicate historical candles before enforcing uniqueness`);
+  }
+
+  private getTimeframeMs(timeframe: string): number {
+    const map: Record<string, number> = {
+      '1m': 60_000,
+      '3m': 180_000,
+      '5m': 300_000,
+      '15m': 900_000,
+      '30m': 1_800_000,
+      '1h': 3_600_000,
+      '4h': 14_400_000,
+      '1d': 86_400_000,
+    };
+
+    return map[timeframe] || 300_000;
+  }
+
+  private normalizeCandles(candles: Candle[]): Candle[] {
+    if (candles.length === 0) return [];
+
+    const byTimestamp = new Map<number, Candle>();
+
+    for (const candle of candles) {
+      const values = [
+        candle.timestamp,
+        candle.open,
+        candle.high,
+        candle.low,
+        candle.close,
+        candle.volume,
+        candle.takerBuyBaseVolume ?? 0,
+        candle.openInterest ?? 0,
+      ];
+
+      const hasBadValue = values.some(v => !Number.isFinite(v));
+      const hasBadRange = candle.timestamp <= 0 ||
+        candle.open <= 0 ||
+        candle.high <= 0 ||
+        candle.low <= 0 ||
+        candle.close <= 0 ||
+        candle.volume < 0 ||
+        candle.low > candle.high ||
+        candle.open < candle.low ||
+        candle.open > candle.high ||
+        candle.close < candle.low ||
+        candle.close > candle.high;
+
+      if (hasBadValue || hasBadRange) continue;
+
+      byTimestamp.set(candle.timestamp, {
+        timestamp: candle.timestamp,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume,
+        takerBuyBaseVolume: candle.takerBuyBaseVolume || 0,
+        openInterest: candle.openInterest || 0,
+      });
+    }
+
+    return Array.from(byTimestamp.values()).sort((a, b) => a.timestamp - b.timestamp);
   }
 
   // ============================================
@@ -380,13 +471,14 @@ export class DatabaseManager {
   // ============================================
 
   /**
-   * Save candles to local cache (INSERT OR IGNORE to avoid duplicates)
+   * Save candles to local cache after normalization and deduplication.
    */
   public saveCandles(symbol: string, timeframe: string, candles: Candle[]): void {
-    if (candles.length === 0) return;
+    const normalized = this.normalizeCandles(candles);
+    if (normalized.length === 0) return;
 
     const insert = this.db.prepare(`
-      INSERT OR IGNORE INTO historical_candles 
+      INSERT OR REPLACE INTO historical_candles 
       (symbol, timeframe, timestamp, open, high, low, close, volume, takerBuyBaseVolume, openInterest)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
@@ -401,8 +493,8 @@ export class DatabaseManager {
       }
     });
 
-    insertMany(candles);
-    logger.info('Database', `Cached ${candles.length} candles for ${symbol}`);
+    insertMany(normalized);
+    logger.info('Database', `Cached ${normalized.length} normalized candles for ${symbol}`);
   }
 
   /**
@@ -417,7 +509,7 @@ export class DatabaseManager {
     `);
 
     const rows = stmt.all(symbol, timeframe, startTime, endTime) as any[];
-    return rows.map(r => ({
+    return this.normalizeCandles(rows.map(r => ({
       timestamp: r.timestamp,
       open: r.open,
       high: r.high,
@@ -426,7 +518,7 @@ export class DatabaseManager {
       volume: r.volume,
       takerBuyBaseVolume: r.takerBuyBaseVolume,
       openInterest: r.openInterest
-    }));
+    })));
   }
 
   /**
@@ -443,7 +535,7 @@ export class DatabaseManager {
     const result = stmt.get(symbol, timeframe, startTime, endTime) as { count: number };
 
     // Calculate expected candle count based on timeframe
-    const timeframeMs = timeframe === '15m' ? 15 * 60 * 1000 : 5 * 60 * 1000;
+    const timeframeMs = this.getTimeframeMs(timeframe);
     const expectedCount = Math.floor((endTime - startTime) / timeframeMs);
 
     // Require at least 80% of expected candles to use cache
