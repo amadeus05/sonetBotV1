@@ -147,6 +147,61 @@ export class Helpers {
   }
 
   /**
+   * Переносит SL/TP с цены сигнала на фактическую цену исполнения, сохраняя те же
+   * абсолютные расстояния risk/reward. Иначе при проскальзывании TP остаётся «старым»
+   * и может оказаться по невыгодную сторону реального входа (TP при убытке).
+   */
+  public static shiftStopsToExecutionPrice(
+    isLong: boolean,
+    signalEntry: number,
+    signalStopLoss: number,
+    signalTakeProfit: number,
+    executionPrice: number
+  ): { stopLoss: number; takeProfit: number } {
+    const riskDist = Math.abs(signalEntry - signalStopLoss);
+    const rewardDist = Math.abs(signalTakeProfit - signalEntry);
+
+    if (
+      !Number.isFinite(executionPrice) ||
+      executionPrice <= 0 ||
+      !Number.isFinite(riskDist) ||
+      riskDist <= 0
+    ) {
+      return { stopLoss: signalStopLoss, takeProfit: signalTakeProfit };
+    }
+
+    if (isLong) {
+      return {
+        stopLoss: executionPrice - riskDist,
+        takeProfit: executionPrice + rewardDist
+      };
+    }
+    return {
+      stopLoss: executionPrice + riskDist,
+      takeProfit: executionPrice - rewardDist
+    };
+  }
+
+  /**
+   * Сохраняет целевой риск в $ при сдвиге входа: (riskDist/entry)*size = const при том же riskDist.
+   */
+  public static scalePositionSizeForExecution(
+    signalEntry: number,
+    signalPositionSize: number,
+    executionPrice: number
+  ): number {
+    if (
+      !Number.isFinite(signalEntry) ||
+      signalEntry <= 0 ||
+      !Number.isFinite(executionPrice) ||
+      executionPrice <= 0
+    ) {
+      return signalPositionSize;
+    }
+    return signalPositionSize * (executionPrice / signalEntry);
+  }
+
+  /**
    * Calculate PnL
    */
   public static calculatePnL(

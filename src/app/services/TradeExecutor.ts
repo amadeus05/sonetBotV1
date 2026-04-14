@@ -70,16 +70,26 @@ export class TradeExecutor {
         return null;
       }
 
+      const rawFill = order.price ?? 0;
+      const fillPrice = rawFill > 0 ? rawFill : entry;
+      const { stopLoss: adjustedSl, takeProfit: adjustedTp } = Helpers.shiftStopsToExecutionPrice(
+        isLong,
+        entry,
+        stopLoss,
+        takeProfit,
+        fillPrice
+      );
+
       // Create position
       const position: Position = {
         id: Helpers.generateId(),
         symbol,
         side: isLong ? PositionSide.LONG : PositionSide.SHORT,
-        entry: order.price || entry,
-        size: order.quantity * (order.price || entry),
+        entry: fillPrice,
+        size: order.quantity * fillPrice,
         leverage: config.getRiskConfig().leverage,
-        stopLoss,
-        takeProfit,
+        stopLoss: adjustedSl,
+        takeProfit: adjustedTp,
         openTime: Date.now(),
         status: PositionStatus.OPEN,
         tags: signal.tags

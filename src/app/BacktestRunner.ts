@@ -14,6 +14,7 @@ import {
     TradeExitReason,
     TradeResult,
     TradingSignal,
+    SignalType,
 } from '../types';
 
 import { MomentumStrategy } from '../domain/strategies/MomentumStrategy';
@@ -26,6 +27,7 @@ import { config } from '../infrastructure/config/ConfigService';
 import { TYPES } from '../di/types';
 import * as fs from 'fs';
 import * as path from 'path';
+import { TradeReportExporter } from './reporting/TradeReportExporter';
 
 // --- CONSTANTS ---
 const BINANCE_TAKER_FEE = 0.0005; // 0.05%
@@ -58,7 +60,7 @@ export class BacktestRunner {
         this.binance = binance;
     }
 
-    public async run(backtestConfig: BacktestConfig): Promise<BacktestResult> {
+    public async run(backtestConfig: BacktestConfig): Promise<BacktestResult> { 
         logger.info('Backtest', '🧪 Starting V7.6 (Fixed & Complete) backtest...', {
             symbols: backtestConfig.symbols.join(', '),
             initialBalance: backtestConfig.initialBalance
@@ -215,7 +217,7 @@ export class BacktestRunner {
 
         console.log('\nSimulation finished.');
         const result = this.calculateResults(backtestConfig);
-        this.saveResults(result); // Теперь этот метод точно существует
+        this.saveResults(result, marketData); // JSON + HTML отчёты по сделкам
         this.displaySummary(result); // И этот тоже
 
         return result;
@@ -224,10 +226,55 @@ export class BacktestRunner {
     // --- EXECUTION LOGIC ---
 
     private tryOpenPosition(signal: TradingSignal, candle: Candle, config: BacktestConfig, currentEquity: number) {
+        // === FIX: РЕАЛИСТИЧНОЕ ИСПОЛНЕНИЕ ===
+        // Мы не можем открыть сделку по цене signal.entry, если текущая цена хуже.
+        
+        let executionPrice = signal.entry;
+
+        if (signal.type === 'LONG') {
+            // Для ЛОНГА:
+            // 1. Если High свечи ниже цены входа -> цена не дошла до лимитки/стопа -> пропускаем
+            if (candle.high < signal.entry) return;
+
+            // 2. Если Open свечи ВЫШЕ цены входа (Гэп вверх) -> мы покупаем по худшей цене (по рынку)
+            // Мы не можем купить по 100, если рынок открылся по 105.
+            executionPrice = Math.max(signal.entry, candle.open);
+        } else {
+            // Для ШОРТА:
+            // 1. Если Low свечи выше цены входа -> цена не дошла -> пропускаем
+            if (candle.low > signal.entry) return;
+
+            // 2. Если Open свечи НИЖЕ цены входа (Гэп вниз) -> мы продаем по худшей цене (по рынку)
+            // Мы не можем продать по 100, если рынок уже упал на 95.
+            executionPrice = Math.min(signal.entry, candle.open);
+        }
+
+        // Добавим проскальзывание (Slippage) на вход, например 0.05%
+        // Для лонга цена выше, для шорта ниже
+        const slippage = executionPrice * 0.0005; 
+        if (signal.type === 'LONG') executionPrice += slippage;
+        else executionPrice -= slippage;
+
+        // =====================================
+
         const leverage = config.risk.leverage;
-        const positionSizeUSDT = signal.positionSize;
+        const isLong = signal.type === SignalType.LONG;
+        const { stopLoss: adjustedStopLoss, takeProfit: adjustedTakeProfit } =
+            Helpers.shiftStopsToExecutionPrice(
+                isLong,
+                signal.entry,
+                signal.stopLoss,
+                signal.takeProfit,
+                executionPrice
+            );
+        const positionSizeUSDT = Helpers.scalePositionSizeForExecution(
+            signal.entry,
+            signal.positionSize,
+            executionPrice
+        );
+
         const marginRequired = positionSizeUSDT / leverage;
-        const entryFee = positionSizeUSDT * BINANCE_TAKER_FEE;
+        const entryFee = positionSizeUSDT * 0.0005; // 0.05% fee
 
         if (this.freeBalance < (marginRequired + entryFee)) return;
 
@@ -235,18 +282,19 @@ export class BacktestRunner {
         for (const pos of this.activePositions) {
             currentRiskExposure += (Math.abs(pos.entry - pos.stopLoss) / pos.entry) * pos.size;
         }
-        const newTradeRisk = (Math.abs(signal.entry - signal.stopLoss) / signal.entry) * positionSizeUSDT;
+        
+        const newTradeRisk = (Math.abs(executionPrice - adjustedStopLoss) / executionPrice) * positionSizeUSDT;
         if ((currentRiskExposure + newTradeRisk) > currentEquity * this.maxRiskExposureRatio) return;
 
         const position: Position = {
             id: Helpers.generateId(),
             symbol: signal.symbol,
-            side: signal.type === 'LONG' ? PositionSide.LONG : PositionSide.SHORT,
-            entry: signal.entry,
+            side: isLong ? PositionSide.LONG : PositionSide.SHORT,
+            entry: executionPrice,
             size: positionSizeUSDT,
             leverage: leverage,
-            stopLoss: signal.stopLoss,
-            takeProfit: signal.takeProfit,
+            stopLoss: adjustedStopLoss,
+            takeProfit: adjustedTakeProfit,
             openTime: candle.timestamp,
             status: PositionStatus.OPEN,
             tags: signal.tags
@@ -260,7 +308,13 @@ export class BacktestRunner {
 
         const date = new Date(candle.timestamp);
         const readableTime = date.toISOString().replace('T', ' ').substring(0, 19);
-        console.log(`\n🔥 OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${signal.entry} (Conf: ${signal.confidence.toFixed(2)})`);
+        
+        // Логируем разницу, если она была существенной
+        const slipLog = Math.abs(executionPrice - signal.entry) > (signal.entry * 0.001) 
+            ? ` (Slipped: ${signal.entry.toFixed(2)} -> ${executionPrice.toFixed(2)})` 
+            : '';
+
+        console.log(`\n🔥 OPEN TRADE [${readableTime}] ${signal.symbol} ${signal.type} @ ${executionPrice.toFixed(4)}${slipLog}`);
         this.activePositions.push(position);
     }
 
@@ -534,11 +588,27 @@ export class BacktestRunner {
     }
 
     // --- UTILS ---
-    private saveResults(result: BacktestResult): void {
+    private saveResults(result: BacktestResult, marketData?: Record<string, Candle[]>): void {
         const resultsDir = './backtest-results';
         if (!fs.existsSync(resultsDir)) fs.mkdirSync(resultsDir, { recursive: true });
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         fs.writeFileSync(path.join(resultsDir, `backtest-${timestamp}.json`), JSON.stringify(result, null, 2));
+
+        // Генерация автономных HTML-отчётов по каждой сделке (100 свечей до/после + entry/tp/sl)
+        try {
+            if (marketData && result.trades?.length) {
+                const tradesDir = path.join(resultsDir, `backtest-${timestamp}-trades`);
+                const timeframe = config.getConfig().timeframe;
+                TradeReportExporter.exportAll(result.trades, marketData, {
+                    outputDir: tradesDir,
+                    timeframe,
+                    candlesBefore: 100,
+                    candlesAfter: 100,
+                });
+            }
+        } catch (e) {
+            logger.warn('Backtest', 'Не удалось сгенерировать HTML-отчёты по сделкам', e);
+        }
     }
 
     private displaySummary(result: BacktestResult): void {
