@@ -167,6 +167,8 @@ export interface RiskParameters {
   maxDailyLoss: number;      // % max loss per day
   maxDrawdown: number;       // % max drawdown
   minRR: number;
+  /** Доля (0.003 = 0.3%): макс. ухудшение фактического входа относительно signal.entry */
+  maxGapEntryPercent: number;
 }
 
 export interface PositionSizeCalculation {

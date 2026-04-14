@@ -255,6 +255,17 @@ export class BacktestRunner {
         if (signal.type === 'LONG') executionPrice += slippage;
         else executionPrice -= slippage;
 
+        const maxGap = config.risk.maxGapEntryPercent;
+        if (
+            Helpers.adverseEntryFraction(
+                signal.type === SignalType.LONG,
+                signal.entry,
+                executionPrice
+            ) > maxGap
+        ) {
+            return;
+        }
+
         // =====================================
 
         const leverage = config.risk.leverage;

@@ -185,6 +185,22 @@ export class Helpers {
   /**
    * Сохраняет целевой риск в $ при сдвиге входа: (riskDist/entry)*size = const при том же riskDist.
    */
+  /**
+   * Доля ухудшения входа относительно цены сигнала (только в невыгодную сторону).
+   * LONG: выше сигнала — хуже; SHORT: ниже сигнала — хуже.
+   */
+  public static adverseEntryFraction(
+    isLong: boolean,
+    signalEntry: number,
+    executionPrice: number
+  ): number {
+    if (!Number.isFinite(signalEntry) || signalEntry <= 0) return 0;
+    if (isLong) {
+      return Math.max(0, (executionPrice - signalEntry) / signalEntry);
+    }
+    return Math.max(0, (signalEntry - executionPrice) / signalEntry);
+  }
+
   public static scalePositionSizeForExecution(
     signalEntry: number,
     signalPositionSize: number,

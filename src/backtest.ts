@@ -25,8 +25,8 @@ async function runBacktest() {
   // Configure backtest
   const backtestConfig: BacktestConfig = {
     // Test last 30 days
-    startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-    endDate: new Date(),
+    startDate: new Date('2025-01-01 00:00:00'),
+    endDate: new Date('2025-12-30 23:59:59'),
 
     // Symbols to test
     symbols: config.getConfig().symbols,
@@ -46,7 +46,8 @@ async function runBacktest() {
   console.log(`   Symbols: ${backtestConfig.symbols.join(', ')}`);
   console.log(`   Initial Balance: $${backtestConfig.initialBalance}`);
   console.log(`   Risk per Trade: ${backtestConfig.risk.riskPerTrade * 100}%`);
-  console.log(`   Leverage: ${backtestConfig.risk.leverage}x\n`);
+  console.log(`   Leverage: ${backtestConfig.risk.leverage}x`);
+  console.log(`   Max gap entry: ${(backtestConfig.risk.maxGapEntryPercent * 100).toFixed(2)}% (reject if worse)\n`);
 
   // Run backtest
   const engine = container.get<BacktestRunner>(TYPES.BacktestEngine);

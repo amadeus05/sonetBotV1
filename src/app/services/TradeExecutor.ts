@@ -72,6 +72,20 @@ export class TradeExecutor {
 
       const rawFill = order.price ?? 0;
       const fillPrice = rawFill > 0 ? rawFill : entry;
+
+      const maxGap = config.getRiskConfig().maxGapEntryPercent;
+      const adverse = Helpers.adverseEntryFraction(isLong, entry, fillPrice);
+      if (adverse > maxGap) {
+        const flattenSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
+        await this.binance.placeMarketOrder(symbol, flattenSide, order.quantity);
+        logger.warn('TradeExecutor', `Вход отклонён: ухудшение ${(adverse * 100).toFixed(3)}% > лимита ${(maxGap * 100).toFixed(3)}% — позиция сброшена`, {
+          entry,
+          fillPrice,
+          symbol
+        });
+        return null;
+      }
+
       const { stopLoss: adjustedSl, takeProfit: adjustedTp } = Helpers.shiftStopsToExecutionPrice(
         isLong,
         entry,

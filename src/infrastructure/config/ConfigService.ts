@@ -72,6 +72,7 @@ export class ConfigService {
                     maxDailyLoss: this.parseNumber(process.env.MAX_DAILY_LOSS, 0.05),
                     maxDrawdown: this.parseNumber(process.env.MAX_DRAWDOWN, 0.15),
                     minRR: this.parseNumber(process.env.MIN_RR, 1.5),
+                    maxGapEntryPercent: this.parseNumber(process.env.MAX_GAP_ENTRY_PERCENT, 0.003),
                 },
             };
 

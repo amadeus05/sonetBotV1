@@ -55,6 +55,8 @@ export const RiskConfigSchema = z.object({
     maxDailyLoss: z.number().min(0).max(1).default(0.05),
     maxDrawdown: z.number().min(0).max(1).default(0.15),
     minRR: z.number().min(1).default(1.5),
+    /** Макс. допустимое ухудшение входа относительно цены сигнала (доля, 0.003 = 0.3%). Выше — сделка не открывается (бэктест) / сразу сбрасывается (лайв). */
+    maxGapEntryPercent: z.number().min(0).max(0.1).default(0.003),
 });
 
 // ============================================
